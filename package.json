@@ -1,0 +1,23 @@
+{
+  "name": "glossa",
+  "version": "1.0.0",
+  "license": "MIT",
+  "description": "Glossa · 从真实代码底座生长出来的领域百科、业务攻略与 AI 参谋引擎",
+  "scripts": {
+    "glossa": "pnpm --filter @glossa/api exec tsx ../../scripts/harness-cli.ts",
+    "harness": "pnpm --filter @glossa/api exec tsx ../../scripts/harness-cli.ts",
+    "data:export": "pnpm --filter @glossa/api exec tsx ../../scripts/data-snapshot.ts export",
+    "data:import": "pnpm --filter @glossa/api exec tsx ../../scripts/data-snapshot.ts import",
+    "worker": "pnpm --filter @glossa/api worker",
+    "worker:once": "pnpm --filter @glossa/api worker:once",
+    "db:push": "pnpm --filter @glossa/api db:push",
+    "db:generate": "pnpm --filter @glossa/api db:generate",
+    "dev": "pnpm --parallel -r dev",
+    "build": "pnpm --filter @glossa/schema build && pnpm --filter @glossa/api build && pnpm --filter @glossa/web build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @glossa/api test"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

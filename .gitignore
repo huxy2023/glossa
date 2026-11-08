@@ -1,0 +1,22 @@
+# Local reference demos & investigation worktrees (Never commit to Git)
+.local-demos/
+.codebase-prd/
+.local-db/
+demo/
+demo-v*/
+
+# Dependencies & Build outputs
+node_modules/
+dist/
+*.tsbuildinfo
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+
+# MyShip & Local Env
+.myship/
+.env
+.env.*
+!.env.example
