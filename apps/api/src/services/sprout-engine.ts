@@ -950,31 +950,69 @@ export async function auditLexiconQuality(options?: {
     }
   }
 
-  // 4. 检测并补齐正文已提及但未挂接 relations 的孤岛词条 + 单向断链血缘
+  // 4. 检测并补齐正文已提及（含同义别名与复合词干）或共属同一源码模块的未挂接孤岛词条 + 单向断链血缘
   for (const source of workingTerms.values()) {
+    const ptrs = source.engineering?.pointers || [];
+    const nonTestPtrs = ptrs.filter(
+      (p) =>
+        !/^(tests|__tests__|test|e2e)\//i.test(p.path) &&
+        !/\.(test|spec)\.[a-z0-9]+$/i.test(p.path)
+    );
+    if (autoFix && nonTestPtrs.length > 0 && nonTestPtrs.length < ptrs.length && source.engineering) {
+      source.engineering = {
+        ...source.engineering,
+        pointers: nonTestPtrs,
+      };
+      markDirty(source);
+    }
+
     const prose = `${source.summary}\n${source.layman.plain}\n${source.articleMarkdown}`;
+    const sourcePaths = new Set(
+      (source.engineering?.pointers || []).map((p) => p.path).filter(Boolean)
+    );
     for (const candidateTarget of workingTerms.values()) {
       if (candidateTarget.id === source.id) continue;
       if (candidateTarget.title.length < 2) continue;
       const alreadyLinked = (source.relations || []).some(
         (r) => r.target === candidateTarget.id
       );
-      if (
-        !alreadyLinked &&
-        (source.relations || []).length < 8 &&
-        prose.includes(candidateTarget.title)
-      ) {
+      if (alreadyLinked || (source.relations || []).length >= 8) continue;
+
+      const subTokens = candidateTarget.title
+        .split(/[与、及或/（）()]/g)
+        .map((s) => s.trim())
+        .filter(
+          (s) =>
+            s.length >= 4 &&
+            !/^(业务流程|全流程|核心概念|处理规则|系统管理)$/.test(s)
+        );
+      const matchTokens = Array.from(
+        new Set([
+          candidateTarget.title,
+          ...(candidateTarget.aliases || []),
+          ...subTokens,
+        ])
+      ).filter((t) => t && t.trim().length >= 2);
+      const matchedMention = matchTokens.find((t) => prose.includes(t));
+      const sharedCodePath = (candidateTarget.engineering?.pointers || [])
+        .map((p) => p.path)
+        .find((p) => p && sourcePaths.has(p));
+
+      if (matchedMention || sharedCodePath) {
         if (autoFix) {
           source.relations = [
             ...(source.relations || []),
-            { target: candidateTarget.id, label: '正文提及关联概念' },
+            {
+              target: candidateTarget.id,
+              label: matchedMention ? '正文提及关联概念' : '同域源码协同概念',
+            },
           ];
           markDirty(source);
         }
         unlinkedMentions.push({
           sourceId: source.id,
           mentionedTargetId: candidateTarget.id,
-          mentionedTitle: candidateTarget.title,
+          mentionedTitle: matchedMention || candidateTarget.title,
           fixed: autoFix,
         });
       }
