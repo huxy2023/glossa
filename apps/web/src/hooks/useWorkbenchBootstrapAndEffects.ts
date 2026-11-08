@@ -177,7 +177,15 @@ export function useWorkbenchBootstrapAndEffects({
     if (data?.ok) {
       const nextTerms = Array.isArray(data.terms) ? data.terms : [];
       const nextCategories = Array.isArray(data.categories) ? data.categories : [];
-      if (nextTerms.length > 0) setTerms(nextTerms);
+      if (nextTerms.length > 0) {
+        setTerms(nextTerms);
+        const firstTerm =
+          nextTerms.find((t: TermEntry) => t.category !== 'asop') || nextTerms[0];
+        if (firstTerm && (!activeTermId || !nextTerms.some((t: TermEntry) => t.id === activeTermId))) {
+          setActiveTermId(firstTerm.id);
+          setGraphCenterId(firstTerm.id);
+        }
+      }
       if (nextCategories.length > 0) setCategories(nextCategories);
       const effectiveUser = userOverride !== undefined ? userOverride : currentUser;
       if (effectiveUser && nextTerms.length > 0) {
@@ -343,7 +351,7 @@ export function useWorkbenchBootstrapAndEffects({
     if (rightDrawerOpen) {
       sp.set('rtab', rightTab);
       const peekStr = peekStack.join(',');
-      if (peekStr && peekStr !== activeTermId && peekStr !== 'marketing-activity') {
+      if (peekStr && peekStr !== activeTermId) {
         sp.set('peek', peekStr);
       }
     }

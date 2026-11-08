@@ -99,18 +99,36 @@ export function RelationCompareWorkspace({
         .slice(0, 8)
     : [];
 
+  const DOMAIN_PALETTE = [
+    { color: '#1D4ED8', bg: '#EFF6FF', border: '#93C5FD' },
+    { color: '#047857', bg: '#ECFDF5', border: '#6EE7B7' },
+    { color: '#B45309', bg: '#FFFBEB', border: '#FCD34D' },
+    { color: '#0E7490', bg: '#ECFEFF', border: '#67E8F9' },
+    { color: '#4338CA', bg: '#EEF2FF', border: '#A5B4FC' },
+    { color: '#C2410C', bg: '#FFF7ED', border: '#FDBA74' },
+    { color: '#BE185D', bg: '#FDF2F8', border: '#F9A8D4' },
+  ];
+
   const domainMetaMap: Record<
     string,
     { name: string; color: string; bg: string; border: string }
   > = {
     asop: { name: '流程攻略', color: '#6D28D9', bg: '#F5F3FF', border: '#C4B5FD' },
-    terminal: { name: '门店终端', color: '#1D4ED8', bg: '#EFF6FF', border: '#93C5FD' },
-    task: { name: '任务稽查', color: '#047857', bg: '#ECFDF5', border: '#6EE7B7' },
-    activity: { name: '行销TPM', color: '#B45309', bg: '#FFFBEB', border: '#FCD34D' },
-    visit: { name: '拜访执行', color: '#0E7490', bg: '#ECFEFF', border: '#67E8F9' },
-    role: { name: '组织角色', color: '#4338CA', bg: '#EEF2FF', border: '#A5B4FC' },
-    order: { name: '订单商品', color: '#C2410C', bg: '#FFF7ED', border: '#FDBA74' },
-    funds: { name: '资金结算', color: '#BE185D', bg: '#FDF2F8', border: '#F9A8D4' },
+  };
+  categories
+    .filter((c) => c.id !== 'asop')
+    .forEach((c, idx) => {
+      const p = DOMAIN_PALETTE[idx % DOMAIN_PALETTE.length];
+      domainMetaMap[c.id] = {
+        name: c.name,
+        color: p.color,
+        bg: p.bg,
+        border: p.border,
+      };
+    });
+  const defaultDomainMeta = {
+    name: categories.find((c) => c.id !== 'asop')?.name || '核心概念',
+    ...DOMAIN_PALETTE[0],
   };
 
   const handleOpenPeek = (tid: string) => {
@@ -171,7 +189,7 @@ export function RelationCompareWorkspace({
     .filter((c) => c.id !== 'asop')
     .map((c) => ({
       catId: c.id,
-      meta: domainMetaMap[c.id] || domainMetaMap.terminal,
+      meta: domainMetaMap[c.id] || { ...defaultDomainMeta, name: c.name },
       items: conceptNeighbors
         .filter((n) => n.term.category === c.id)
         .sort((a, b) => a.term.title.localeCompare(b.term.title, 'zh-CN')),
@@ -247,7 +265,10 @@ export function RelationCompareWorkspace({
     return null;
   };
 
-  const centerCat = domainMetaMap[centerTerm.category] || domainMetaMap.terminal;
+  const centerCat = domainMetaMap[centerTerm.category] || {
+    ...defaultDomainMeta,
+    name: categories.find((c) => c.id === centerTerm.category)?.name || centerTerm.category || defaultDomainMeta.name,
+  };
 
   return (
     <div className="article-container" style={{ maxWidth: 960 }}>

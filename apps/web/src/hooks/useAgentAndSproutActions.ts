@@ -552,7 +552,7 @@ export function useAgentAndSproutActions({
   };
 
   const handleRunSproutWave = async (seedTermId?: string) => {
-    const effectiveId = seedTermId || activeTerm?.id || 'fee-terminal';
+    const effectiveId = seedTermId || activeTerm?.id || '';
     setSproutBusy(true);
     try {
       const res = await fetch('/api/harness/run-wave', {

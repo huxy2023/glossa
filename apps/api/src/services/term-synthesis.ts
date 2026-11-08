@@ -237,6 +237,14 @@ export async function generateTermWithHarness(
   // 仅当存在真实源码考据命中或显式授信/模板确认时方可视为已核实 (grounded=true)；纯模型凭未核实上下文合成的草稿必须保留为 DRAFT 待审
   const grounded = Boolean(hits.length > 0 || options?.isGroundedOverride);
 
+  const defaultCategory =
+    options?.category ||
+    lexiconStore
+      .getCategories()
+      .find((c) => c.id !== 'asop' && cleanTitle.includes(c.name.slice(0, 2)))?.id ||
+    lexiconStore.getCategories().find((c) => c.id !== 'asop')?.id ||
+    'core';
+
   const newTerm: TermEntry = {
     id: slug,
     title: cleanTitle,
@@ -245,7 +253,7 @@ export async function generateTermWithHarness(
       .slice(0, 4)
       .toUpperCase()
       .replace(/[^A-Z0-9]/g, 'LX'),
-    category: options?.category || 'terminal',
+    category: defaultCategory,
     aliases: [cleanTitle],
     summary: generatedPlain,
     layman: {

@@ -5,8 +5,13 @@ import { lexiconStore } from '../services/lexicon-store.js';
 import { pgExecute, encryptApiKey } from '../services/pg-database.js';
 import {
   readPrdFile,
+  grepPrdCode,
   inspectTermsDrift,
+  getPrdManifest,
+  validateRepoAndRelativePath,
+  WORKSPACE_ROOT,
 } from '../services/codebase-probe.js';
+import { extractTextSproutCandidates } from '../services/sprout-engine.js';
 import {
   runAgentAsk,
   generateTermWithHarness,
@@ -146,6 +151,109 @@ test('2. 源码探针路径越界防护 (Path Traversal)、行号越界防护与
     filePath: 'passwd',
   });
   assert.equal(invalidRepoAttempt, null, '非法仓库名必须被拒绝');
+
+  // 验证敏感文件（.env / .pem / .key / credentials / secret）被严格阻断
+  assert.equal(
+    validateRepoAndRelativePath('demo-billing-service', '.env'),
+    null,
+    '.env 敏感配置文件必须被拦截'
+  );
+  assert.equal(
+    validateRepoAndRelativePath('demo-billing-service', 'config/.env.production'),
+    null,
+    '.env.production 敏感配置文件必须被拦截'
+  );
+  assert.equal(
+    validateRepoAndRelativePath('demo-billing-service', 'certs/server.key'),
+    null,
+    '私钥文件必须被拦截'
+  );
+
+  // 验证单仓库 GLOSSA_WORKSPACE_ROOT 模式（根目录本身含 .git）可正常发现并读取受控源码且拦截 .env
+  const prevWsRoot = process.env.GLOSSA_WORKSPACE_ROOT;
+  process.env.GLOSSA_WORKSPACE_ROOT = WORKSPACE_ROOT;
+  try {
+    const singleRepoManifest = getPrdManifest();
+    assert.ok(singleRepoManifest['glossa'], '单 Git 仓库作为 GLOSSA_WORKSPACE_ROOT 时应自动识别');
+    const pkgSlice = await readPrdFile({
+      repo: 'glossa',
+      filePath: 'package.json',
+      lines: 'L1-L10',
+    });
+    assert.ok(pkgSlice && pkgSlice.content.includes('"name": "glossa"'), '单仓库模式下应能正常读取源码');
+    const envAttempt = await readPrdFile({
+      repo: 'glossa',
+      filePath: '.env',
+    });
+    assert.equal(envAttempt, null, '单仓库模式下同样必须拦截 .env 读取');
+    const singleRepoDrift = await inspectTermsDrift([
+      {
+        id: 'single-repo-term',
+        title: '单仓漂移巡检测试',
+        pinyin: 'SCPYXJ',
+        category: 'core',
+        aliases: [],
+        summary: 'test',
+        layman: { analogy: 'a', plain: 'b' },
+        articleMarkdown: 'test',
+        engineering: {
+          repos: ['glossa'],
+          pointers: [
+            {
+              repo: 'glossa',
+              branch: singleRepoManifest['glossa'].branch,
+              commit: singleRepoManifest['glossa'].commit,
+              path: 'package.json',
+              desc: 'root package',
+            },
+          ],
+          dataMappings: [],
+        },
+        relations: [],
+        faqs: [],
+      },
+    ]);
+    assert.equal(singleRepoDrift.syncedCount, 1, '单仓库模式下漂移巡检应正常识别 Git 仓库并判为 synced');
+  } finally {
+    if (prevWsRoot !== undefined) {
+      process.env.GLOSSA_WORKSPACE_ROOT = prevWsRoot;
+    } else {
+      delete process.env.GLOSSA_WORKSPACE_ROOT;
+    }
+  }
+
+  // 验证数据库快照搜索同样拦截敏感路径 (config/credentials.json)
+  await lexiconStore.upsertCodeSnapshot({
+    repo: 'demo-billing-service',
+    branch: 'main',
+    commitSha: 'a1b2c3d4',
+    filePath: 'config/credentials.json',
+    lineRange: 'L1-L3',
+    content: '    1 | {"secretLeakMarker": "DO_NOT_RETURN_THIS"}',
+  });
+  const sensitiveHits = await grepPrdCode('secretLeakMarker', 'demo-billing-service', 10, false);
+  assert.equal(sensitiveHits.length, 0, '数据库快照搜索必须过滤敏感路径 config/credentials.json');
+  await pgExecute(`DELETE FROM lexicon_code_snapshots WHERE file_path = 'config/credentials.json'`);
+
+  // 验证跨行业通用概念触手提取（不限于快消后缀，教育/AI/SaaS 概念均可提取）
+  const nonFmcgSprouts = extractTextSproutCandidates(
+    {
+      id: 'edu-course-center',
+      title: '智能教务中心',
+      pinyin: 'ZNJWZX',
+      category: 'core',
+      aliases: [],
+      summary: '负责 **课程排期** 与 **模型训练** 任务调度的教务中台。',
+      layman: { analogy: 'a', plain: '支持【学分核算】与【算力配额】联动。' },
+      articleMarkdown: '通过 **课程排期** 触发【学分核算】。',
+      relations: [],
+      faqs: [],
+    },
+    []
+  );
+  const sproutNames = nonFmcgSprouts.map((s) => s.name);
+  assert.ok(sproutNames.includes('课程排期'), '应能提取非快消领域概念「课程排期」');
+  assert.ok(sproutNames.includes('模型训练'), '应能提取非快消领域概念「模型训练」');
 
   // 验证越界行号返回 null
   const outOfRangeAttempt = await readPrdFile({

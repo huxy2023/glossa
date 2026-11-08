@@ -474,7 +474,7 @@ export async function enqueueCandidatesSql(
         run.id,
         cleanName,
         normName,
-        item.category || 'terminal',
+        item.category || 'core',
         input.depth ?? 1,
         JSON.stringify([newOrigin]),
         recAction,

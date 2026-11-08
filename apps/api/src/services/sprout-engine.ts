@@ -74,12 +74,9 @@ export function extractTextSproutCandidates(
     '状态说明',
   ]);
 
-  const DOMAIN_SUFFIX_REGEX =
-    /(?:门店|终端|网点|协议|额度|核销|稽查|补贴|返利|账户|资金池|价格行|规则组|围栏|白名单|黑名单|清算|红冲|调拨|搭赠|拜访|路线|陈列|防窜货|分账|专员|经理|经销商|分销商|二批商|云仓|订单)$/;
-
   const regexes = [
-    /\*\*([\u4e00-\u9fa5A-Za-z0-9·\-]{3,12})\*\*/g,
-    /[【「]([\u4e00-\u9fa5A-Za-z0-9·\-]{3,12})[】」]/g,
+    /\*\*([\u4e00-\u9fa5A-Za-z0-9·\-]{2,18})\*\*/g,
+    /[【「]([\u4e00-\u9fa5A-Za-z0-9·\-]{2,18})[】」]/g,
   ];
 
   for (const rgx of regexes) {
@@ -89,18 +86,15 @@ export function extractTextSproutCandidates(
       const norm = lexiconStore.normalizeConceptName(phrase);
       if (
         !norm ||
-        norm.length < 3 ||
+        norm.length < 2 ||
         seenNorm.has(norm) ||
         sourceSelfNorms.has(norm) ||
+        existingNorms.has(norm) ||
         STOP_PHRASES.has(phrase) ||
         /^(阶段|步骤|场景|问题|原因|规则|维度|指标|方式|类型|状态)\d*$/.test(phrase)
       ) {
         continue;
       }
-      if (!DOMAIN_SUFFIX_REGEX.test(phrase) && existingNorms.has(norm)) {
-        continue;
-      }
-      if (!DOMAIN_SUFFIX_REGEX.test(phrase)) continue;
 
       seenNorm.add(norm);
       const idx = match.index;
@@ -179,6 +173,9 @@ export async function dissectTermSproutsWithHarness(input: {
   let mode: 'antigravity-direct' | 'llm-dissector' | 'domain-rule-dissector' =
     'domain-rule-dissector';
 
+  const defaultCategory =
+    lexiconStore.getCategories().find((c) => c.id !== 'asop')?.id || 'core';
+
   if (Array.isArray(input.customSprouts) && input.customSprouts.length > 0) {
     rawSprouts = input.customSprouts;
     mode = 'antigravity-direct';
@@ -189,7 +186,7 @@ export async function dissectTermSproutsWithHarness(input: {
       id: effectiveSourceId,
       title: effectiveSourceTitle,
       pinyin: 'SEED',
-      category: 'terminal',
+      category: defaultCategory,
       aliases: [],
       summary: input.rawText.slice(0, 200),
       layman: { analogy: '', plain: input.rawText.slice(0, 200) },
@@ -326,7 +323,7 @@ export async function dissectTermSproutsWithHarness(input: {
                     ? existing.category
                     : sourceTerm?.category && sourceTerm.category !== 'asop'
                       ? sourceTerm.category
-                      : 'terminal';
+                      : defaultCategory;
               byNorm.set(norm, {
                 name: cleanAiName,
                 category: rawCat,
@@ -362,7 +359,7 @@ export async function dissectTermSproutsWithHarness(input: {
     operator,
     candidates: rawSprouts.map((s) => ({
       name: s.name,
-      category: s.category || sourceTerm?.category || 'terminal',
+      category: s.category || sourceTerm?.category || defaultCategory,
       sourceTermId: effectiveSourceId,
       sourceTermTitle: effectiveSourceTitle,
       quote: s.quote || s.name,

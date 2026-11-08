@@ -49,7 +49,7 @@ export function rowToExpansionCandidate(row: any): ExpansionCandidate {
     runId: row.run_id,
     name: row.name,
     normalizedName: row.normalized_name,
-    category: row.category || 'terminal',
+    category: row.category || 'core',
     status: row.status || 'PENDING',
     depth: Number(row.depth || 1),
     origins,

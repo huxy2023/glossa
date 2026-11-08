@@ -482,7 +482,9 @@ export function PcSidebarTree({
                 onClick={() => {
                   if (expandedTreeCats.length >= categories.length) {
                     const focusCat =
-                      termMap.get(sidebarFocusTermId)?.category || 'terminal';
+                      termMap.get(sidebarFocusTermId)?.category ||
+                      categories.find((c) => c.id !== 'asop')?.id ||
+                      'core';
                     setExpandedTreeCats([focusCat]);
                   } else {
                     setExpandedTreeCats(categories.map((c) => c.id));

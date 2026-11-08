@@ -679,7 +679,8 @@ app.post('/api/harness/run-wave', async (c) => {
     );
   }
   const body = await c.req.json().catch(() => ({}));
-  const seedTermId = String(body.seedTermId || 'fee-terminal').trim();
+  const defaultSeed = lexiconStore.getTerms().find((t) => t.category !== 'asop')?.id || lexiconStore.getTerms()[0]?.id || '';
+  const seedTermId = String(body.seedTermId || defaultSeed).trim();
   try {
     const result = await runSproutWaveWithHarness({
       seedTermId,

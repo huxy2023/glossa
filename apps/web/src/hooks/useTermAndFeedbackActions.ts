@@ -74,7 +74,7 @@ export function useTermAndFeedbackActions({
     revision: 1,
     title: '',
     subtitle: '',
-    category: 'terminal',
+    category: 'core',
     aliasesText: '',
     summary: '',
     analogy: '',

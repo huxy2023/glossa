@@ -566,7 +566,7 @@ export async function decodeJargonParagraph(
     new Set(rawText.match(/[A-Za-z_][A-Za-z0-9_]{3,}/g) || [])
   );
   const chineseSearchTokens = domainPhrases
-    .filter((p) => p.length >= 3 && !['移动端', '经销商'].includes(p))
+    .filter((p) => p.length >= 3 && !['移动端', '客户端', '管理端'].includes(p))
     .slice(0, 4);
   if (chineseSearchTokens.length === 0 && domainPhrases.length > 0) {
     chineseSearchTokens.push(...domainPhrases.slice(0, 2));
@@ -626,16 +626,16 @@ export async function decodeJargonParagraph(
     const scoreHit = (h: CodeSearchHit) => {
       let s = 0;
       if (
-        /\/home\/|\/Home\/|\/SalesPerson\/|StoreListAdapter|StoreListFragment|SalespersonIndex|SalesPersonHome/i.test(
+        /Service|Controller|Manager|Handler|Engine|UseCase|Domain|Policy|Validator|Workflow/i.test(
           h.path
         )
       ) {
-        s += 45;
-      } else if (/StoreList|Terminal|Visit|Task|Activity/i.test(h.path)) {
+        s += 40;
+      } else if (/\/src\/|\/domain\/|\/service\/|\/core\//i.test(h.path)) {
         s += 20;
       }
       if (h.snippet.length >= 22) s += 12;
-      if (/^\/\/\s*获取附近门店$|^\/\/\s*附近门店|console\.(log|error)/i.test(h.snippet)) {
+      if (/console\.(log|error)/i.test(h.snippet)) {
         s -= 20;
       }
       if (/ copy/i.test(h.path)) s -= 25;

@@ -54,19 +54,19 @@ export function readUrlState() {
   if (typeof window === 'undefined') {
     return {
       tab: 'article' as MainTabType,
-      term: 'fee-terminal',
+      term: '',
       cat: 'all',
-      rel: 'fee-terminal',
+      rel: '',
       vs: null as string | null,
       rtab: 'peek' as RightTabType,
       scope: 'term' as ScopeModeType,
-      peek: ['marketing-activity'],
+      peek: [] as string[],
     };
   }
   const sp = new URLSearchParams(window.location.search);
   const rawTab = sp.get('tab') as MainTabType | null;
   const tab: MainTabType = rawTab && VALID_MAIN_TABS.has(rawTab) ? rawTab : 'article';
-  const term = sp.get('term')?.trim() || 'fee-terminal';
+  const term = sp.get('term')?.trim() || '';
   const cat = sp.get('cat')?.trim() || 'all';
   const rel = sp.get('rel')?.trim() || term;
   const vs = sp.get('vs')?.trim() || null;
@@ -80,7 +80,9 @@ export function readUrlState() {
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean)
-    : [term || 'marketing-activity'];
+    : term
+      ? [term]
+      : [];
   return {
     tab,
     term,
@@ -89,7 +91,7 @@ export function readUrlState() {
     vs,
     rtab,
     scope,
-    peek: peek.length > 0 ? peek : ['marketing-activity'],
+    peek,
   };
 }
 

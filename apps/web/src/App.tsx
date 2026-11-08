@@ -84,7 +84,7 @@ export function App() {
     return Boolean(sp.get('rtab') || sp.get('peek'));
   });
   const [expandedTreeCats, setExpandedTreeCats] = useState<string[]>(() =>
-    initialUrl.cat !== 'all' ? [initialUrl.cat] : ['terminal']
+    initialUrl.cat !== 'all' ? [initialUrl.cat] : ['core']
   );
   const [peekStack, setPeekStack] = useState<string[]>(() => initialUrl.peek);
   const [toastNotice, setToastNotice] = useState<string>('');
@@ -156,7 +156,7 @@ export function App() {
   const termMap = useMemo(() => new Map(terms.map((t) => [t.id, t])), [terms]);
   const matchers = useMemo(() => buildKeywordMatchers(terms), [terms]);
   const activeTerm = termMap.get(activeTermId) || terms[0];
-  const currentPeekId = peekStack[peekStack.length - 1] || 'marketing-activity';
+  const currentPeekId = peekStack[peekStack.length - 1] || '';
   const peekTerm = termMap.get(currentPeekId) || terms[1] || terms[0];
   const sidebarFocusTermId = mainTab === 'graph' ? graphCenterId : activeTerm?.id || activeTermId;
 
@@ -740,7 +740,14 @@ export function App() {
             <button
               className="btn btn-primary"
               disabled={!cmdkQuery.trim()}
-              onClick={() => handleGenerateNewTerm(cmdkQuery.trim(), categories[0]?.id || 'core')}
+              onClick={() =>
+                handleGenerateNewTerm(
+                  cmdkQuery.trim(),
+                  undefined,
+                  undefined,
+                  categories.find((c) => c.id !== 'asop')?.id || categories[0]?.id || 'core'
+                )
+              }
             >
               播种首个词条
             </button>

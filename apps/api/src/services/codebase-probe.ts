@@ -9,11 +9,14 @@ import crypto from 'node:crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const WORKSPACE_ROOT = path.resolve(__dirname, '../../../..');
-export const CODEBASE_PRD_ROOT = path.resolve(
-  process.env.GLOSSA_WORKSPACE_ROOT ||
-    process.env.LEXICON_WORKSPACE_ROOT ||
-    path.join(WORKSPACE_ROOT, '.codebase-prd')
-);
+export function getCodebasePrdRoot(): string {
+  return path.resolve(
+    process.env.GLOSSA_WORKSPACE_ROOT ||
+      process.env.LEXICON_WORKSPACE_ROOT ||
+      path.join(WORKSPACE_ROOT, '.codebase-prd')
+  );
+}
+export const CODEBASE_PRD_ROOT = getCodebasePrdRoot();
 
 export interface RepoCommitInfo {
   name: string;
@@ -99,9 +102,50 @@ async function dispatchTaskToIntranetWorker(
 }
 
 let cachedScannedManifest: Record<string, RepoCommitInfo> | null = null;
+let cachedScannedRoot = '';
+
+function readGitInfo(repoDir: string, repoName: string): RepoCommitInfo {
+  let commit = 'HEAD';
+  let branch = 'main';
+  try {
+    commit = execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], {
+      cwd: repoDir,
+      encoding: 'utf8',
+      timeout: 1500,
+    }).trim();
+    branch =
+      execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: repoDir,
+        encoding: 'utf8',
+        timeout: 1500,
+      }).trim() || 'main';
+  } catch {
+    // ignore
+  }
+  return {
+    name: repoName,
+    branch,
+    commit,
+    committedAt: new Date().toISOString(),
+  };
+}
+
+export function resolveRepoDir(cleanRepo: string): string {
+  const prdRoot = getCodebasePrdRoot();
+  const childDir = path.join(prdRoot, cleanRepo);
+  if (fs.existsSync(path.join(childDir, '.git')) || fs.existsSync(path.join(prdRoot, 'manifest.json'))) {
+    return childDir;
+  }
+  const rootRepoName = path.basename(prdRoot).replace(/[^a-zA-Z0-9_-]/g, '-') || 'workspace';
+  if (cleanRepo === rootRepoName && fs.existsSync(path.join(prdRoot, '.git'))) {
+    return prdRoot;
+  }
+  return childDir;
+}
 
 export function getPrdManifest(): Record<string, RepoCommitInfo> {
-  const manifestPath = path.join(CODEBASE_PRD_ROOT, 'manifest.json');
+  const prdRoot = getCodebasePrdRoot();
+  const manifestPath = path.join(prdRoot, 'manifest.json');
   if (fs.existsSync(manifestPath)) {
     try {
       const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -113,49 +157,43 @@ export function getPrdManifest(): Record<string, RepoCommitInfo> {
     }
   }
 
-  if (cachedScannedManifest) {
+  if (cachedScannedManifest && cachedScannedRoot === prdRoot) {
     return cachedScannedManifest;
   }
 
   const discovered: Record<string, RepoCommitInfo> = {};
-  if (fs.existsSync(CODEBASE_PRD_ROOT)) {
+  if (fs.existsSync(prdRoot)) {
     try {
-      const entries = fs.readdirSync(CODEBASE_PRD_ROOT, { withFileTypes: true });
+      const entries = fs.readdirSync(prdRoot, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
         if (!SAFE_REPO_RE.test(entry.name)) continue;
-        const repoDir = path.join(CODEBASE_PRD_ROOT, entry.name);
+        const repoDir = path.join(prdRoot, entry.name);
         if (!fs.existsSync(path.join(repoDir, '.git'))) continue;
-        let commit = 'HEAD';
-        let branch = 'main';
-        try {
-          commit = execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], {
-            cwd: repoDir,
-            encoding: 'utf8',
-            timeout: 1500,
-          }).trim();
-          branch =
-            execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-              cwd: repoDir,
-              encoding: 'utf8',
-              timeout: 1500,
-            }).trim() || 'main';
-        } catch {
-          // ignore
-        }
-        discovered[entry.name] = {
-          name: entry.name,
-          branch,
-          commit,
-          committedAt: new Date().toISOString(),
-        };
+        discovered[entry.name] = readGitInfo(repoDir, entry.name);
+      }
+      if (Object.keys(discovered).length === 0 && fs.existsSync(path.join(prdRoot, '.git'))) {
+        const rootRepoName = path.basename(prdRoot).replace(/[^a-zA-Z0-9_-]/g, '-') || 'workspace';
+        discovered[rootRepoName] = readGitInfo(prdRoot, rootRepoName);
       }
     } catch {
       // ignore
     }
   }
   cachedScannedManifest = discovered;
+  cachedScannedRoot = prdRoot;
   return discovered;
+}
+
+export function isSensitiveRelativePath(normalized: string): boolean {
+  const segments = normalized.split('/').filter(Boolean);
+  const baseName = segments[segments.length - 1] || '';
+  return (
+    segments.some((seg) => /^\.env($|\.)/i.test(seg) || seg === '.git' || seg === '.ssh') ||
+    /\.(pem|key|p12|pfx|crt|cer|jks|keystore)$/i.test(baseName) ||
+    /^(id_rsa|id_ed25519)/i.test(baseName) ||
+    /(credential|secret|passwd|shadow)/i.test(baseName)
+  );
 }
 
 /**
@@ -183,12 +221,13 @@ export function validateRepoAndRelativePath(
     normalized === '.' ||
     normalized.includes('docs/') ||
     normalized.includes('docs-site/') ||
-    normalized.endsWith('.md')
+    normalized.endsWith('.md') ||
+    isSensitiveRelativePath(normalized)
   ) {
     return null;
   }
 
-  const repoRoot = path.resolve(CODEBASE_PRD_ROOT, cleanRepo);
+  const repoRoot = path.resolve(resolveRepoDir(cleanRepo));
   const absCandidate = path.resolve(repoRoot, normalized);
   if (!absCandidate.startsWith(repoRoot + path.sep)) {
     return null;
@@ -209,6 +248,7 @@ export async function grepPrdCode(
   const q = String(query || '').trim();
   if (!q) return [];
 
+  const prdRoot = getCodebasePrdRoot();
   const manifest = getPrdManifest();
   if (repoFilter && !SAFE_REPO_RE.test(repoFilter)) {
     return [];
@@ -217,10 +257,12 @@ export async function grepPrdCode(
     return [];
   }
   const targetRepos = repoFilter ? [repoFilter] : Object.keys(manifest);
+  const isSingleRepoRoot =
+    targetRepos.length === 1 && resolveRepoDir(targetRepos[0]) === prdRoot;
   const hits: CodeSearchHit[] = [];
 
-  if (fs.existsSync(CODEBASE_PRD_ROOT)) {
-    if (!repoFilter) {
+  if (fs.existsSync(prdRoot)) {
+    if (!repoFilter && !isSingleRepoRoot) {
       try {
         const out = execFileSync(
           'rg',
@@ -236,6 +278,12 @@ export async function grepPrdCode(
             '!**/docs-site/**',
             '-g',
             '!**/*.md',
+            '-g',
+            '!**/.env*',
+            '-g',
+            '!**/*.pem',
+            '-g',
+            '!**/*.key',
             '-g',
             '!**/scripts/**',
             '-g',
@@ -253,7 +301,7 @@ export async function grepPrdCode(
             q,
             '.',
           ],
-          { cwd: CODEBASE_PRD_ROOT, encoding: 'utf8', timeout: 5000, maxBuffer: 4 * 1024 * 1024 }
+          { cwd: prdRoot, encoding: 'utf8', timeout: 5000, maxBuffer: 4 * 1024 * 1024 }
         );
 
         for (const line of out.split('\n')) {
@@ -261,12 +309,13 @@ export async function grepPrdCode(
           const match = line.match(/^(?:\.\/)?([^/]+)\/([^:]+):(\d+):(.*)$/);
           if (match) {
             const repo = match[1];
-            if (!manifest[repo]) continue;
+            const relPath = match[2];
+            if (!manifest[repo] || isSensitiveRelativePath(relPath)) continue;
             hits.push({
               repo,
               branch: manifest[repo]?.branch || 'prd',
               commit: manifest[repo]?.commit || 'unknown',
-              path: match[2],
+              path: relPath,
               line: Number(match[3]),
               snippet: match[4].trim().slice(0, 220),
             });
@@ -278,7 +327,7 @@ export async function grepPrdCode(
     } else {
       for (const repo of targetRepos) {
         if (hits.length >= limit) break;
-        const repoDir = path.join(CODEBASE_PRD_ROOT, repo);
+        const repoDir = resolveRepoDir(repo);
         if (!fs.existsSync(repoDir)) continue;
 
         try {
@@ -296,6 +345,12 @@ export async function grepPrdCode(
               '!**/docs-site/**',
               '-g',
               '!**/*.md',
+              '-g',
+              '!**/.env*',
+              '-g',
+              '!**/*.pem',
+              '-g',
+              '!**/*.key',
               '-g',
               '!**/scripts/**',
               '-g',
@@ -319,7 +374,7 @@ export async function grepPrdCode(
           for (const line of out.split('\n')) {
             if (!line.trim() || hits.length >= limit) continue;
             const match = line.match(/^(?:\.\/)?([^:]+):(\d+):(.*)$/);
-            if (match) {
+            if (match && !isSensitiveRelativePath(match[1])) {
               hits.push({
                 repo,
                 branch: manifest[repo]?.branch || 'prd',
@@ -373,6 +428,7 @@ export async function grepPrdCode(
       if (hits.length >= limit) break;
       const snapRepo = String(row.repo || '');
       const snapPath = String(row.file_path || '');
+      if (isSensitiveRelativePath(snapPath)) continue;
       const snapContent = String(row.content || '');
       const matchedLine =
         snapContent
@@ -434,7 +490,7 @@ export async function readPrdFile(params: {
     rangeMatch && rangeMatch[2] ? Math.max(startLine, Number(rangeMatch[2])) : startLine + 35;
 
   const headCommit = repoInfo.commit;
-  const repoDir = path.join(CODEBASE_PRD_ROOT, cleanRepo);
+  const repoDir = resolveRepoDir(cleanRepo);
 
   // 1. 本地 .codebase-prd Git Worktree 实证读取
   if (fs.existsSync(repoDir)) {
@@ -637,7 +693,7 @@ export async function inspectTermsDrift(terms: TermEntry[]) {
 
       const { cleanRepo, cleanPath } = validated;
       const headCommit = repoInfo.commit;
-      const repoDir = path.join(CODEBASE_PRD_ROOT, cleanRepo);
+      const repoDir = resolveRepoDir(cleanRepo);
 
       let status: 'synced' | 'drifted' | 'error' = 'synced';
       let diffStat = '';

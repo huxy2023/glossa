@@ -335,7 +335,8 @@ export async function runAgentAsk(req: AgentAskRequest): Promise<AgentAskRespons
   const searchKw =
     tokenMatches.find((w) => !['为什么', '什么意思', '怎么理解', '区别是什么', '有哪些'].includes(w)) ||
     activeTerm?.title ||
-    'isFeeTerminalByCode';
+    activeTerm?.id ||
+    req.question.trim().slice(0, 16);
 
   const rawSearchJson = await executeHarnessTool(
     'grep_prd_code',
@@ -591,7 +592,8 @@ export async function streamAgentAsk(
   const searchKw =
     tokenMatches.find((w) => !['为什么', '什么意思', '怎么理解', '区别是什么', '有哪些'].includes(w)) ||
     activeTerm?.title ||
-    'isFeeTerminalByCode';
+    activeTerm?.id ||
+    req.question.trim().slice(0, 16);
 
   const rawSearchJson = await executeHarnessTool(
     'grep_prd_code',

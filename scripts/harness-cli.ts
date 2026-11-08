@@ -21,34 +21,16 @@ async function main() {
 
   if (cmd === 'reset') {
     await lexiconStore.ensureInitialized();
-    const feeTerm = await lexiconStore.getTermByIdAsync('fee-terminal');
-    if (feeTerm) {
-      const cleanedAliases = (feeTerm.aliases || []).filter(
-        (a) => a !== '行销费用门店' && a !== '活动准入店'
-      );
-      if (cleanedAliases.length !== (feeTerm.aliases || []).length) {
-        await lexiconStore.updateTermFieldsAsync(
-          'fee-terminal',
-          { aliases: cleanedAliases },
-          'antigravity-cli'
-        );
-      }
+    const dropTermId = parseArgFlag(args, '--term');
+    if (dropTermId) {
+      await lexiconStore.deleteTermAsync(dropTermId, 'antigravity-cli');
+      await pgExecute(`DELETE FROM lexicon_term_revisions WHERE term_id = $1`, [dropTermId]);
     }
-    for (const demoId of [
-      'terminal-volume-lock-agreement',
-      'display-exclusivity-check',
-      'lock-volume-tiered-payout',
-    ]) {
-      await lexiconStore.deleteTermAsync(demoId, 'antigravity-cli');
-    }
-    await pgExecute(
-      `DELETE FROM lexicon_term_revisions WHERE term_id IN ('terminal-volume-lock-agreement', 'display-exclusivity-check', 'lock-volume-tiered-payout')`
-    );
     await pgExecute('DELETE FROM lexicon_expansion_candidates');
     await pgExecute('DELETE FROM lexicon_expansion_runs');
     console.log(
       JSON.stringify(
-        { ok: true, command: 'reset', message: '已清空繁衍记忆账本与演示衍生词条' },
+        { ok: true, command: 'reset', message: '已清空繁衍记忆账本与波次记录' },
         null,
         2
       )
@@ -81,7 +63,7 @@ async function main() {
     const query = args[1] || parseArgFlag(args, '--query') || '';
     const category = parseArgFlag(args, '--category') as CategoryId | undefined;
     if (!query) {
-      console.error('用法: pnpm harness lookup "<概念名称>" [--category terminal]');
+      console.error('用法: pnpm glossa lookup "<概念名称>" [--category core]');
       process.exit(1);
     }
     const res = await lexiconStore.lookupConceptAsync(query, category);
@@ -90,7 +72,12 @@ async function main() {
   }
 
   if (cmd === 'dissect') {
-    const sourceTermId = args[1] || parseArgFlag(args, '--term') || 'fee-terminal';
+    const allTerms = await lexiconStore.getTermsAsync();
+    const sourceTermId = args[1] || parseArgFlag(args, '--term') || allTerms[0]?.id || '';
+    if (!sourceTermId) {
+      console.error('用法: pnpm glossa dissect <termId>');
+      process.exit(1);
+    }
     const res = await dissectTermSproutsWithHarness({
       sourceTermId,
       operator: 'antigravity-cli',
@@ -126,7 +113,12 @@ async function main() {
   }
 
   if (cmd === 'run-wave') {
-    const seedTermId = args[1] || parseArgFlag(args, '--seed') || 'fee-terminal';
+    const allTerms = await lexiconStore.getTermsAsync();
+    const seedTermId = args[1] || parseArgFlag(args, '--seed') || allTerms[0]?.id || '';
+    if (!seedTermId) {
+      console.error('用法: pnpm glossa run-wave <seedTermId>');
+      process.exit(1);
+    }
     const maxDepth = Number(parseArgFlag(args, '--depth') || 2);
     const maxDrafts = Number(parseArgFlag(args, '--max-drafts') || 5);
     const res = await runSproutWaveWithHarness({
