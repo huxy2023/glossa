@@ -1,9 +1,11 @@
 import { lexiconStore } from '../apps/api/src/services/lexicon-store.js';
 import { pgExecute } from '../apps/api/src/services/pg-database.js';
+import { inspectTermsDrift } from '../apps/api/src/services/codebase-probe.js';
 import {
   dissectTermSproutsWithHarness,
   expandCandidateWithHarness,
   runSproutWaveWithHarness,
+  auditLexiconQuality,
 } from '../apps/api/src/services/agent-harness.js';
 import type { CandidateAction, CategoryId } from '@glossa/schema';
 
@@ -132,6 +134,37 @@ async function main() {
     process.exit(0);
   }
 
+  if (cmd === 'audit') {
+    const autoFix = args.includes('--fix') || args.includes('--auto-fix');
+    const res = await auditLexiconQuality({
+      autoFix,
+      operator: 'antigravity-cli',
+    });
+    console.log(JSON.stringify({ ok: true, command: 'audit', ...res }, null, 2));
+    process.exit(0);
+  }
+
+  if (cmd === 'drift') {
+    const termId = args[1] || parseArgFlag(args, '--term');
+    const allTerms = await lexiconStore.getTermsAsync();
+    const targetTerms = termId
+      ? allTerms.filter((t) => t.id === termId)
+      : allTerms;
+    const driftSummary = await inspectTermsDrift(targetTerms);
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          command: 'drift',
+          ...driftSummary,
+        },
+        null,
+        2
+      )
+    );
+    process.exit(0);
+  }
+
   console.error(
     [
       'Glossa AI Agent Harness CLI (双入口主控端)',
@@ -141,6 +174,8 @@ async function main() {
       '  pnpm glossa dissect <termId>                         顺藤摸瓜剖析指定词条，将候选触手写入记忆账本',
       '  pnpm glossa resolve <candId或名称> [--action ...]    执行三路决议（GENERATE_TERM / MERGE_AS_ALIAS / REJECT）',
       '  pnpm glossa run-wave [seedTermId]                    从引爆点执行有界 BFS 触手裂变与同义词自动归并',
+      '  pnpm glossa audit [--fix]                            执行词库质量巡检与自动修复（台前净化/分类纠偏/双向血缘）',
+      '  pnpm glossa drift [termId]                           检查词条关联的源码指针与当前工作区 Git Commit 是否漂移',
     ].join('\n')
   );
   process.exit(1);

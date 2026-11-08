@@ -165,6 +165,7 @@ function buildSkillSystemPrompt(
     `1. ${domainContextLine}`,
     '2. 严禁脱离给定的【领域词典实证定义】与【真实源码取证片段】，严禁凭空臆造当前系统词典与源码中根本不存在的外部行业概念或虚假状态。',
     '3. 请输出结构清晰、专业笃定的 Markdown 报告，不要使用 Emoji 图标。在解释业务规则时，可自然引用源码中已证实的业务状态或控制逻辑作为实证支撑。',
+    '4. 【唯一事实源铁律】：核验目标工作区时，只以真实业务源码（Controller/Service/Domain/Store/View/SQL）为唯一事实源，严禁采信或搜索目标仓内的 docs/、docs-site/ 及历史 .md 文档，防止过时设计文档误导结论。',
   ];
 
   if (skillId === 'troubleshooting') {
@@ -415,12 +416,17 @@ export async function decodeJargonParagraph(
 
   const allTerms = await lexiconStore.getTermsAsync();
   const currentPhrases = extractChineseDomainPhrases(rawText, allTerms);
-  const historyUserText = priorTurns
+  // 提取最近 2 轮（最多 4 条消息）的连续会话文本，用于省略主语追问（如“那怎么改配置？”）的指代消解与主题继承
+  const recentHistoryTurns = priorTurns.slice(-4);
+  const historyUserText = recentHistoryTurns
     .filter((t) => t.role === 'user')
     .map((t) => t.content)
     .join(' ');
-  const historyPhrases = historyUserText
-    ? extractChineseDomainPhrases(historyUserText, allTerms)
+  const recentHistoryAllText = recentHistoryTurns
+    .map((t) => t.content)
+    .join(' ');
+  const historyPhrases = recentHistoryAllText
+    ? extractChineseDomainPhrases(recentHistoryAllText, allTerms)
     : [];
   const domainPhrases = Array.from(new Set([...currentPhrases, ...historyPhrases]));
 
@@ -440,7 +446,7 @@ export async function decodeJargonParagraph(
     categoryBreakdown,
   };
 
-  // 1. 多层级语义词条召回（精确包含 + 领域短语拆解打分 + 概念查重器召回）
+  // 1. 多层级语义词条召回（精确包含 + 多轮主语指代继承 + 领域短语拆解打分 + 概念查重器召回）
   const scoredTerms = new Map<
     string,
     { term: TermEntry; score: number; matchedPhrase: string }
@@ -471,6 +477,21 @@ export async function decodeJargonParagraph(
     );
     if (exactHit) {
       recordTermHit(t, 120 + exactHit.length * 5, exactHit);
+    } else if (recentHistoryAllText) {
+      // 多轮对话主题继承：当前句省略主语时，若最近 2 轮上下文明确讨论过该词条，赋予上下文延续加分
+      const historyExactHit = candidates.find((c) =>
+        recentHistoryAllText.toLowerCase().includes(c.toLowerCase())
+      );
+      if (historyExactHit) {
+        const inUserTurn = historyUserText
+          .toLowerCase()
+          .includes(historyExactHit.toLowerCase());
+        recordTermHit(
+          t,
+          (inUserTurn ? 65 : 42) + historyExactHit.length * 3,
+          historyExactHit
+        );
+      }
     }
 
     for (const phrase of domainPhrases) {
@@ -506,8 +527,10 @@ export async function decodeJargonParagraph(
         .split(/[\/,\s()]+/)
         .map((s) => s.trim())
         .filter((s) => s.length >= 4);
-      const hitFieldOrTable = [...fieldTokens, ...tableTokens].find((tok) =>
-        rawText.toLowerCase().includes(tok.toLowerCase())
+      const hitFieldOrTable = [...fieldTokens, ...tableTokens].find(
+        (tok) =>
+          rawText.toLowerCase().includes(tok.toLowerCase()) ||
+          historyUserText.toLowerCase().includes(tok.toLowerCase())
       );
       if (hitFieldOrTable) {
         matchedFields.push({
@@ -556,14 +579,49 @@ export async function decodeJargonParagraph(
     })
   );
 
+  // 将 Top-4 召回词条的 dataMappings 自动挂载到 matchedFields 并提取库表/字段英文名作为代码探针搭桥词
+  const bridgedMappingTokens: string[] = [];
+  for (const { term } of rankedTermEntries.slice(0, 4)) {
+    for (const dm of term.engineering?.dataMappings || []) {
+      if (
+        !matchedFields.some(
+          (mf) =>
+            mf.termId === term.id &&
+            mf.table === dm.table &&
+            mf.field === dm.field
+        )
+      ) {
+        matchedFields.push({
+          termId: term.id,
+          termTitle: term.title,
+          db: dm.db,
+          table: dm.table,
+          field: dm.field,
+          rule: dm.rule,
+        });
+      }
+      const rawTokens = `${dm.field} ${dm.table}`.match(
+        /[A-Za-z_][A-Za-z0-9_]{3,}/g
+      );
+      if (rawTokens) {
+        bridgedMappingTokens.push(...rawTokens);
+      }
+    }
+  }
+
   traceSteps.push({
     tool: 'lexicon_semantic_recall',
     summary: `提取领域短语 [${domainPhrases.slice(0, 6).join('、')}] -> 召回 ${matchedTerms.length} 个领域词条与攻略`,
   });
 
-  // 2. 中英文双路源码实证探针（搜索英文标识符 + 核心中文业务短语）
+  // 2. 中英文双路源码实证探针（搜索当前/历史英文标识符 + 词条映射表字段 + 核心中文业务短语）
+  const currentEnglishTokens = rawText.match(/[A-Za-z_][A-Za-z0-9_]{3,}/g) || [];
+  const historyEnglishTokens =
+    currentEnglishTokens.length === 0 && recentHistoryAllText
+      ? recentHistoryAllText.match(/[A-Za-z_][A-Za-z0-9_]{3,}/g) || []
+      : [];
   const englishTokens = Array.from(
-    new Set(rawText.match(/[A-Za-z_][A-Za-z0-9_]{3,}/g) || [])
+    new Set([...currentEnglishTokens, ...historyEnglishTokens])
   );
   const chineseSearchTokens = domainPhrases
     .filter((p) => p.length >= 3 && !['移动端', '客户端', '管理端'].includes(p))
@@ -573,8 +631,12 @@ export async function decodeJargonParagraph(
   }
 
   const codeQueries = Array.from(
-    new Set([...englishTokens.slice(0, 3), ...chineseSearchTokens])
-  ).slice(0, 5);
+    new Set([
+      ...englishTokens.slice(0, 3),
+      ...bridgedMappingTokens.slice(0, 4),
+      ...chineseSearchTokens,
+    ])
+  ).slice(0, 8);
 
   const codeHits: DecodeJargonResult['codeHits'] = [];
   for (const q of codeQueries) {
@@ -589,12 +651,13 @@ export async function decodeJargonParagraph(
     }
   }
 
-  // 将命中词条自带的权威源码锚点也补充进候选证据（若检索结果较少）
-  for (const { term } of rankedTermEntries.slice(0, 3)) {
-    for (const ptr of (term.engineering?.pointers || []).slice(0, 2)) {
+  // 将 Top-4 命中词条自带的权威源码锚点（engineering.pointers）始终注入候选证据并记录高优集合
+  const authoritativePointerFiles = new Set<string>();
+  for (const { term } of rankedTermEntries.slice(0, 4)) {
+    for (const ptr of (term.engineering?.pointers || []).slice(0, 3)) {
+      authoritativePointerFiles.add(`${ptr.repo}:${ptr.path}`);
       const startLine = Number(((ptr.lines || '1').match(/\d+/) || [1])[0]);
       if (
-        codeHits.length < 12 &&
         !codeHits.some((c) => c.repo === ptr.repo && c.path === ptr.path)
       ) {
         codeHits.push({
@@ -611,7 +674,7 @@ export async function decodeJargonParagraph(
 
   traceSteps.push({
     tool: 'grep_prd_code',
-    summary: `在 38 仓源码库中检索 [${codeQueries.join(', ')}] -> 命中 ${codeHits.length} 处真实源码位置`,
+    summary: `在源码库中检索 [${codeQueries.join(', ')}] -> 命中 ${codeHits.length} 处真实源码位置`,
   });
 
   // 3. 读取前 4 处最核心源码的真实上下文窗口（供大模型或 Codex CLI 直接取证）
@@ -625,6 +688,9 @@ export async function decodeJargonParagraph(
   const prioritizedHits = [...codeHits].sort((a, b) => {
     const scoreHit = (h: CodeSearchHit) => {
       let s = 0;
+      if (authoritativePointerFiles.has(`${h.repo}:${h.path}`)) {
+        s += 50;
+      }
       if (
         /Service|Controller|Manager|Handler|Engine|UseCase|Domain|Policy|Validator|Workflow/i.test(
           h.path
@@ -786,7 +852,7 @@ export async function decodeJargonParagraph(
     const codexPrompt = [
       systemPrompt,
       '',
-      '【极速实证指令】：我们已经为你从工作区源码库实时检索并附上了最核心的真实源码上下文切片（见下方「精读的真实源码上下文切片」）以及领域词典定义。请直接基于下方已提供的源码切片与词典证据立即撰写并输出 Markdown 报告，不要执行任何 shell 命令或额外文件搜索！',
+      '【极速实证与唯一事实源指令】：我们已经为你从工作区源码库实时检索并附上了最核心的真实源码上下文切片（见下方「精读的真实源码上下文切片」）以及领域词典定义。请直接基于下方已提供的源码切片与词典证据立即撰写并输出 Markdown 报告，不要执行任何 shell 命令或额外文件搜索；严禁读取或引用 docs/、docs-site/ 及任何 .md 文档！',
       '',
       userContextPayload,
     ].join('\n');

@@ -8,17 +8,21 @@ import { lexiconStore } from './lexicon-store.js';
 
 export {
   generateTermWithHarness,
+  sanitizeBusinessProse,
   testAiProviderConnection,
   decodeJargonParagraph,
   type DecodeJargonResult,
 } from './term-synthesis.js';
 
 export {
+  isNoiseOrTechCandidate,
   extractTextSproutCandidates,
   dissectTermSproutsWithHarness,
   expandCandidateWithHarness,
   runSproutWaveWithHarness,
+  auditLexiconQuality,
   type DissectSproutInputItem,
+  type LexiconQualityAuditReport,
 } from './sprout-engine.js';
 
 export interface AgentAskRequest {

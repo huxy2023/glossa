@@ -11,10 +11,15 @@ import {
   validateRepoAndRelativePath,
   WORKSPACE_ROOT,
 } from '../services/codebase-probe.js';
-import { extractTextSproutCandidates } from '../services/sprout-engine.js';
+import {
+  extractTextSproutCandidates,
+  isNoiseOrTechCandidate,
+  auditLexiconQuality,
+} from '../services/sprout-engine.js';
 import {
   runAgentAsk,
   generateTermWithHarness,
+  sanitizeBusinessProse,
   validateAllowedLlmBaseUrl,
   decodeJargonParagraph,
   extractDsmlToolCalls,
@@ -761,5 +766,322 @@ test('7. AI Agent Harness 触手裂变、多父节点记忆归并与同义词别
     ]
   );
   await pgExecute(`DELETE FROM lexicon_expansion_runs WHERE id = $1`, [testRunId]);
+  await cleanupNeutralTestFixtures();
+});
+
+test('10. Harness 全链路增强闭环：噪音/技术词过滤、真实代码指针沉淀、多轮参谋搭桥与 auditLexiconQuality 自愈', async () => {
+  for (const tid of ['ut-synth-quota-freeze', 'term-sprout-ut-polluted']) {
+    await pgExecute(`DELETE FROM lexicon_term_revisions WHERE term_id = $1`, [tid]);
+    await pgExecute(`DELETE FROM lexicon_terms WHERE id = $1`, [tid]);
+  }
+  await lexiconStore.refreshFromPg();
+  await setupNeutralTestFixtures();
+
+  // (A) 验证 isNoiseOrTechCandidate 与 extractTextSproutCandidates 过滤表格角色列头与技术名词，放行中英文合法业务概念，且不继承 asop
+  assert.equal(isNoiseOrTechCandidate('填报角色'), true, '表格列头「填报角色」应被拦截');
+  assert.equal(isNoiseOrTechCandidate('复盘角色'), true, '表格列头「复盘角色」应被拦截');
+  assert.equal(isNoiseOrTechCandidate('操作步骤'), true, '表格列头「操作步骤」应被拦截');
+  assert.equal(isNoiseOrTechCandidate('分布式锁'), true, '技术词「分布式锁」应被拦截');
+  assert.equal(isNoiseOrTechCandidate('OrderController'), true, '类名「OrderController」应被拦截');
+  assert.equal(isNoiseOrTechCandidate('verifyAvailableQuota'), true, 'camelCase 方法名应被拦截');
+  assert.equal(isNoiseOrTechCandidate('order_split_flag'), true, 'snake_case 字段名应被拦截');
+  assert.equal(isNoiseOrTechCandidate('Redis'), true, '中间件「Redis」应被拦截');
+  assert.equal(isNoiseOrTechCandidate('专项返利冻结'), false, '合法中文业务概念「专项返利冻结」应放行');
+  assert.equal(isNoiseOrTechCandidate('Subscription'), false, '合法英文业务概念「Subscription」应放行');
+  assert.equal(isNoiseOrTechCandidate('Invoice'), false, '合法英文业务概念「Invoice」应放行');
+  assert.equal(isNoiseOrTechCandidate('SKU'), false, '合法英文业务概念「SKU」应放行');
+
+  const extractedFromAsop = extractTextSproutCandidates(
+    {
+      id: 'asop-order-fulfillment',
+      title: '订单履约端到端攻略',
+      pinyin: 'DDLYGL',
+      category: 'asop',
+      aliases: [],
+      summary: '涉及 **填报角色**、**分布式锁**、**Subscription** 与 **专项返利冻结** 的协同。',
+      layman: { analogy: 'a', plain: '包含【复盘角色】、【Redis】与【跨仓调拨核销】。' },
+      articleMarkdown: '通过 **专项返利冻结** 联动【跨仓调拨核销】。',
+      relations: [],
+      faqs: [],
+    },
+    []
+  );
+  const extractedNames = extractedFromAsop.map((c) => c.name);
+  assert.ok(!extractedNames.includes('填报角色'), 'extractTextSproutCandidates 必须过滤「填报角色」');
+  assert.ok(!extractedNames.includes('复盘角色'), 'extractTextSproutCandidates 必须过滤「复盘角色」');
+  assert.ok(!extractedNames.includes('分布式锁'), 'extractTextSproutCandidates 必须过滤「分布式锁」');
+  assert.ok(!extractedNames.includes('Redis'), 'extractTextSproutCandidates 必须过滤「Redis」');
+  assert.ok(extractedNames.includes('专项返利冻结'), '应保留真实业务概念「专项返利冻结」');
+  assert.ok(extractedNames.includes('Subscription'), '应保留真实英文业务概念「Subscription」');
+  assert.ok(
+    extractedFromAsop.every((c) => c.category !== 'asop'),
+    '从 asop 父词条提取的子概念严禁盲目继承 asop 分类'
+  );
+
+  // (B) 验证 generateTermWithHarness 真实沉淀 engineering.pointers、生成 >=2 条排障 FAQ、净化代码泄露并织入双向血缘
+  await lexiconStore.upsertCodeSnapshot({
+    repo: 'demo-billing-service',
+    branch: 'main',
+    commitSha: 'a1b2c3d4',
+    filePath: 'src/services/CreditPoolService.ts',
+    lineRange: 'L10-L25',
+    content: [
+      '   10 | // 专项额度预占核验：校验客户可用授信余额与冻结阈值',
+      '   11 | export class CreditPoolService {',
+      '   12 |   public verifyAvailableQuota(accountId: string): boolean {',
+      '   13 |     return hasActiveCreditSnapshot(accountId);',
+      '   14 |   }',
+      '   15 | }',
+    ].join('\n'),
+  });
+
+  const synthTermId = 'ut-synth-quota-freeze';
+  const generated = await generateTermWithHarness('单元测试额度预占核验', 'unit-test', {
+    preferredId: synthTermId,
+    contextSnippet: '调用 verifyAvailableQuota 执行额度校验',
+    aiExplanation:
+      '用于下单前锁定单元测试授信资金池额度（详见 `CreditPoolService.ts` @a1b2c3d4）。',
+  });
+
+  assert.equal(generated.grounded, true, '命中源码快照时 grounded 应为 true');
+  assert.ok(
+    (generated.term.engineering?.pointers || []).length >= 1,
+    'generateTermWithHarness 必须将真实命中的源码写入 engineering.pointers，严禁为空数组'
+  );
+  assert.ok(
+    (generated.term.engineering?.repos || []).includes('demo-billing-service'),
+    'generateTermWithHarness 必须记录命中的 repo'
+  );
+  assert.ok(
+    (generated.term.faqs || []).length >= 2,
+    'generateTermWithHarness 必须生成至少 2 条排障/协同 FAQ'
+  );
+  assert.ok(
+    !generated.term.articleMarkdown.includes('CreditPoolService.ts') &&
+      !generated.term.articleMarkdown.includes('@a1b2c3d4'),
+    '台前正文必须自动剥离泄露的代码文件名与 @commit 哈希'
+  );
+  assert.ok(
+    (generated.term.relations || []).some((r) => r.target === FIXTURE_TERM_A),
+    '正文提及既有词条「单元测试授信资金池」时应自动织入 relations'
+  );
+  const fixtureAAfterSynth = await lexiconStore.getTermByIdAsync(FIXTURE_TERM_A);
+  assert.ok(
+    (fixtureAAfterSynth?.relations || []).some((r) => r.target === synthTermId),
+    '被提及的目标词条应自动补齐反向血缘关联'
+  );
+
+  // 验证显式传入 category='asop' 且同时携带 sourceTermId 时，必须保留 'asop' 分类（支持“采纳为流程攻略”入口）
+  const explicitAsopDraft = await generateTermWithHarness(
+    '单元测试跨仓履约端到端攻略',
+    'unit-test',
+    {
+      preferredId: 'asop-ut-explicit-playbook',
+      category: 'asop',
+      sourceTermId: FIXTURE_TERM_A,
+      persistImmediately: false,
+    }
+  );
+  assert.equal(
+    explicitAsopDraft.term.category,
+    'asop',
+    '显式传入 category=asop 时，即使携带 sourceTermId 也必须保持 asop 分类'
+  );
+
+  // (C) 验证 decodeJargonParagraph 多轮主语继承 + dataMappings 与 pointers 源码探针搭桥
+  if (fixtureAAfterSynth) {
+    await lexiconStore.saveTermAsync(
+      {
+        ...fixtureAAfterSynth,
+        engineering: {
+          repos: ['demo-billing-service'],
+          pointers: [
+            {
+              repo: 'demo-billing-service',
+              branch: 'main',
+              commit: 'a1b2c3d4',
+              path: 'src/services/CreditPoolService.ts',
+              lines: 'L10-L15',
+              desc: '授信资金池可用额度校验实现',
+            },
+          ],
+          dataMappings: [
+            {
+              db: 'billing_db',
+              table: 't_credit_account_pool',
+              field: 'verifyAvailableQuota',
+              rule: '可用授信池余额实时校验标识',
+            },
+          ],
+        },
+      },
+      '补充测试映射与指针',
+      'unit-test',
+      fixtureAAfterSynth.meta?.revision
+    );
+  }
+
+  // 验证仅继承父词条指针但自身无任何代码命中时，grounded 必须为 false（保留 DRAFT 待审，不触发误自动转正）
+  const inheritedOnlyDraft = await generateTermWithHarness(
+    '单元测试无源码命中子概念',
+    'unit-test',
+    {
+      preferredId: 'ut-inherited-ptr-only',
+      sourceTermId: FIXTURE_TERM_A,
+      persistImmediately: false,
+    }
+  );
+  assert.equal(
+    inheritedOnlyDraft.grounded,
+    false,
+    '仅继承父词条指针而自身零代码命中时，grounded 必须保持 false 以防未核实词条自动转正'
+  );
+  assert.ok(
+    (inheritedOnlyDraft.term.engineering?.pointers || []).length >= 1,
+    '无直接代码命中时仍应继承父词条参考指针供人工审阅溯源'
+  );
+
+  const followUpRes = await decodeJargonParagraph({
+    text: '那怎么改它的阈值配置？',
+    enginePreference: 'llm-api',
+    history: [
+      {
+        role: 'user',
+        content: '为什么单元测试授信资金池会拦截客户的订单？',
+      },
+      {
+        role: 'assistant',
+        content: '因为单元测试授信资金池在余额不足时会触发拦截。',
+      },
+    ],
+  });
+
+  assert.ok(
+    followUpRes.matchedTerms.some((m) => m.id === FIXTURE_TERM_A),
+    '省略主语的连续追问必须通过多轮 history 继承召回前序核心词条「单元测试授信资金池」'
+  );
+  assert.ok(
+    followUpRes.matchedFields.some(
+      (mf) => mf.table === 't_credit_account_pool' && mf.field === 'verifyAvailableQuota'
+    ),
+    '召回词条的 dataMappings 必须自动搭桥注入 matchedFields'
+  );
+  assert.ok(
+    followUpRes.codeHits.some(
+      (h) =>
+        h.repo === 'demo-billing-service' &&
+        h.path === 'src/services/CreditPoolService.ts'
+    ),
+    '召回词条的 engineering.pointers 与 dataMappings 标识符必须搭桥命中源码证据'
+  );
+
+  // (D) 验证 auditLexiconQuality({ autoFix: true }) 一键巡检与自愈
+  const pollutedId = 'term-sprout-ut-polluted';
+  await lexiconStore.saveTermAsync(
+    {
+      id: pollutedId,
+      title: '单元测试异常冲正机制',
+      pinyin: 'DYCSYCCZ',
+      category: 'asop', // 故意错误设置为 asop
+      aliases: [],
+      summary: '在 OrderSplitService.java @deadbeef1234 中执行的冲正规则。',
+      layman: {
+        analogy: '就像超市退货后原路退回卡内额度。',
+        plain: '触发冲正时会联动单元测试订单拆单回滚。',
+      },
+      articleMarkdown: [
+        '## 核心规则',
+        '',
+        '通过 `OrderSplitService.java` (@deadbeef1234) 校验并联动单元测试订单拆单状态。',
+        '```mermaid',
+        'flowchart LR',
+        'A[发起冲正(预审/复核)] --> B[额度回滚]',
+        '```',
+      ].join('\n'),
+      engineering: { repos: [], pointers: [], dataMappings: [] },
+      relations: [], // 故意漏掉与 FIXTURE_TERM_B（单元测试订单拆单）的关联
+      faqs: [],
+      meta: {
+        updatedAt: '2026-11-08',
+        maintainedBy: 'unit-test',
+        status: 'PUBLISHED',
+        revision: 1,
+      },
+    },
+    '注入待自愈脏词条',
+    'unit-test'
+  );
+
+  const auditReport = await auditLexiconQuality({
+    autoFix: true,
+    operator: 'unit-test',
+  });
+
+  assert.ok(
+    auditReport.codeLeakageTerms.some((t) => t.id === pollutedId && t.fixed),
+    'auditLexiconQuality 应检出并修复代码文件名/Commit哈希泄露'
+  );
+  assert.ok(
+    auditReport.categoryMismatches.some(
+      (t) => t.id === pollutedId && t.fromCategory === 'asop' && t.toCategory !== 'asop' && t.fixed
+    ),
+    'auditLexiconQuality 应检出并纠偏误设为 asop 的子词条分类'
+  );
+  assert.ok(
+    auditReport.unlinkedMentions.some(
+      (u) => u.sourceId === pollutedId && u.mentionedTargetId === FIXTURE_TERM_B && u.fixed
+    ),
+    'auditLexiconQuality 应检出并自动挂接正文提及但未建立 relations 的词条'
+  );
+
+  const healedTerm = await lexiconStore.getTermByIdAsync(pollutedId);
+  assert.ok(healedTerm, '自愈后词条应存在');
+  assert.equal(
+    healedTerm.meta?.revision,
+    2,
+    'auditLexiconQuality 自愈写回必须携带 expectedRevision 并原子递增 revision'
+  );
+  assert.notEqual(healedTerm.category, 'asop', '自愈后分类不应再为 asop');
+  assert.ok(
+    !healedTerm.summary.includes('OrderSplitService.java') &&
+      !healedTerm.articleMarkdown.includes('@deadbeef1234'),
+    '自愈后台前文本不应包含代码文件名或 Commit 哈希'
+  );
+  assert.ok(
+    healedTerm.articleMarkdown.includes('A["发起冲正(预审/复核)"]'),
+    'sanitizeBusinessProse 应自动为含括号/斜杠的 Mermaid 节点补齐双引号'
+  );
+  assert.ok(
+    (healedTerm.relations || []).some((r) => r.target === FIXTURE_TERM_B),
+    '自愈后应自动补齐指向「单元测试订单拆单」的血缘关系'
+  );
+  const healedTargetB = await lexiconStore.getTermByIdAsync(FIXTURE_TERM_B);
+  assert.ok(
+    (healedTargetB?.relations || []).some((r) => r.target === pollutedId),
+    '自愈后目标词条也应拥有反向血缘链接（双向闭环）'
+  );
+
+  // 验证携带过期 expectedRevision 保存词条时触发 REVISION_CONFLICT 乐观锁保护，绝不静默覆盖并发修改
+  await assert.rejects(
+    async () => {
+      await lexiconStore.saveTermAsync(
+        {
+          ...healedTerm,
+          summary: '试图用过期版本号覆盖并发修改',
+        },
+        '过期版本写回测试',
+        'unit-test',
+        1 // 当前实际版本已是 2，传入 1 必须抛出冲突
+      );
+    },
+    /版本冲突 \(409\)/,
+    '传入过期 expectedRevision 时必须触发 409 版本冲突乐观锁拦截'
+  );
+
+  // 清理本次测试新增数据
+  for (const tid of [synthTermId, pollutedId]) {
+    await pgExecute(`DELETE FROM lexicon_term_revisions WHERE term_id = $1`, [tid]);
+    await pgExecute(`DELETE FROM lexicon_terms WHERE id = $1`, [tid]);
+  }
   await cleanupNeutralTestFixtures();
 });

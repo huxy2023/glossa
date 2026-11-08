@@ -5,6 +5,43 @@ import { lexiconStore } from './lexicon-store.js';
 import { validateAllowedLlmBaseUrl } from './agent-harness.js';
 
 /**
+ * 净化面向业务读者的台前文本：
+ * 1. 剥离模型偶发泄露的 DSML 内部标签；
+ * 2. 剥离裸露的代码文件名（.java/.kt/.ts/.tsx/.vue/.sql 等）与 @commit 哈希；
+ * 3. 自动为 Mermaid 流程图中包含括号/斜杠的未加引号节点补齐双引号，防止渲染报错。
+ */
+export function sanitizeBusinessProse(text: string): string {
+  if (!text) return '';
+  let cleaned = String(text)
+    .replace(/<[｜|]DSML[｜|][^>]*>/g, '')
+    .replace(/<\/?[a-z_]+_call>/gi, '')
+    .replace(
+      /[（(][^（）()\n]*?\b[A-Za-z0-9_./-]+\.(?:java|kt|ts|tsx|vue|js|py|go|sql|xml)\b[^（）()\n]*?[）)]/gi,
+      ''
+    )
+    .replace(
+      /`?\b[A-Za-z0-9_./-]+\.(?:java|kt|ts|tsx|vue|js|py|go|sql|xml)(?:#L\d+(?:-L?\d+)?)?\b`?/gi,
+      '系统核心规则模块'
+    )
+    .replace(/@[0-9a-f]{7,40}\b/gi, '');
+
+  // 修复 Mermaid 节点中含 () 或 / 却未加双引号的语法隐患
+  cleaned = cleaned.replace(
+    /```mermaid([\s\S]*?)```/g,
+    (_full, body: string) => {
+      const safeBody = body.replace(
+        /\b([A-Za-z0-9_]+)\[([^"\]\n]*?[()\/][^"\]\n]*?)\]/g,
+        (_m, nodeId: string, label: string) =>
+          `${nodeId}["${label.replace(/"/g, "'")}"]`
+      );
+      return `\`\`\`mermaid${safeBody}\`\`\``;
+    }
+  );
+
+  return cleaned.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+/**
  * 考据生成新词条草稿并写入 PostgreSQL (状态设为 DRAFT，绝不在零命中时捏造假代码路径或假表名)
  */
 export async function generateTermWithHarness(
@@ -72,14 +109,17 @@ export async function generateTermWithHarness(
     }
   }
 
-  if (hits.length === 0 && cleanTitle.length >= 5) {
+  if (hits.length === 0 && cleanTitle.length >= 4) {
     const stripped = cleanTitle
-      .replace(/(?:变更免审批规则|免审批规则|变更审批|管理规则|核算规则|判定规则|执行标准|处理流程|管理办法|业务规则|规则|机制|体系)$/g, '')
+      .replace(
+        /(?:变更免审批规则|免审批规则|变更审批|管理规则|核算规则|判定规则|执行标准|处理流程|管理办法|业务规则|校验规则|准入规则|规则|机制|体系|策略|标准|口径)$/g,
+        ''
+      )
       .trim();
     if (
-      stripped.length >= 4 &&
+      stripped.length >= 2 &&
       stripped !== cleanTitle &&
-      /^[\u4e00-\u9fa5]+$/.test(stripped)
+      /^[\u4e00-\u9fa5A-Za-z0-9]+$/.test(stripped)
     ) {
       const subHits = await grepPrdCode(stripped, undefined, 6);
       if (subHits.length > 0) {
@@ -92,22 +132,34 @@ export async function generateTermWithHarness(
     }
   }
 
-  // 将命中的前 3 处真实源码片段自动同步至 PostgreSQL lexicon_code_snapshots
+  const parentTerm = options?.sourceTermId
+    ? await lexiconStore.getTermByIdAsync(options.sourceTermId)
+    : undefined;
+
+  // 将命中的前 3 处真实源码片段自动同步至 PostgreSQL lexicon_code_snapshots 并提取精准代码指针
   const codeEvidenceNotes: string[] = [];
-  for (const h of hits.slice(0, 3)) {
+  const synthesizedPointers: NonNullable<TermEntry['engineering']>['pointers'] = [];
+
+  for (const h of hits.slice(0, 4)) {
     const slice = await readPrdFile({
       repo: h.repo,
       filePath: h.path,
       lines: `L${Math.max(1, h.line - 8)}-L${h.line + 20}`,
       commit: h.commit,
     });
-    if (slice && slice.content) {
+    const lineRange = slice
+      ? `L${slice.startLine}-L${slice.endLine}`
+      : `L${Math.max(1, h.line - 8)}-L${h.line + 20}`;
+    const resolvedCommit = slice?.resolvedCommit || h.commit || 'HEAD';
+    const branch = slice?.branch || h.branch || 'prd';
+
+    if (slice && slice.content && synthesizedPointers.length < 3) {
       await lexiconStore.upsertCodeSnapshot({
         repo: slice.repo,
         branch: slice.branch,
         commitSha: slice.resolvedCommit,
         filePath: slice.path,
-        lineRange: `L${slice.startLine}-L${slice.endLine}`,
+        lineRange,
         content: slice.content,
       });
       const chineseComments =
@@ -119,7 +171,50 @@ export async function generateTermWithHarness(
         codeEvidenceNotes.push(...chineseComments.slice(0, 2));
       }
     }
+
+    if (
+      !synthesizedPointers.some((p) => p.repo === h.repo && p.path === h.path)
+    ) {
+      synthesizedPointers.push({
+        repo: h.repo,
+        branch,
+        commit: resolvedCommit,
+        path: h.path,
+        lines: lineRange,
+        desc:
+          sanitizeBusinessProse(h.snippet || '').slice(0, 100) ||
+          `【${cleanTitle}】相关的业务规则与状态校验实现`,
+      });
+    }
   }
+
+  // 若仍无直接命中但父词条存在已证实的源码指针，继承父词条关联链路指针兜底，防止同链路子词条变成无根孤岛
+  if (
+    synthesizedPointers.length === 0 &&
+    parentTerm?.engineering?.pointers &&
+    parentTerm.engineering.pointers.length > 0
+  ) {
+    for (const ptr of parentTerm.engineering.pointers.slice(0, 2)) {
+      synthesizedPointers.push({
+        repo: ptr.repo,
+        branch: ptr.branch || 'prd',
+        commit: ptr.commit,
+        path: ptr.path,
+        lines: ptr.lines,
+        desc: `承接父词条【${parentTerm.title}】链路：${ptr.desc}`,
+      });
+    }
+  }
+
+  const synthesizedRepos = Array.from(
+    new Set(synthesizedPointers.map((p) => p.repo))
+  );
+  let synthesizedDataMappings: NonNullable<
+    TermEntry['engineering']
+  >['dataMappings'] =
+    parentTerm?.engineering?.dataMappings
+      ? parentTerm.engineering.dataMappings.slice(0, 2)
+      : [];
 
   const aiCfg = await lexiconStore.getServerAiConfig();
   const rawAdopted = String(options?.aiExplanation || '').trim();
@@ -171,12 +266,27 @@ export async function generateTermWithHarness(
         } |`,
       ].join('\n');
 
+  let generatedFaqs: NonNullable<TermEntry['faqs']> = [
+    {
+      q: `在实际业务协同中，如何理解【${cleanTitle}】的定位与准入条件？`,
+      a: `${generatedPlain} 在发起业务动作前，需先确认主体状态与前置资质已满足要求。`,
+    },
+    {
+      q: `如果遇到【${cleanTitle}】触发系统拦截或状态异常，现场该如何排查？`,
+      a: `${
+        dedupedEvidenceNotes.length > 0
+          ? `重点核查以下系统校验规则：${dedupedEvidenceNotes.join('；')}。`
+          : `建议依次核对：1. 关联主数据或单据是否处于有效状态；2. 当前操作人角色与组织管辖范围是否匹配；3. 上游前置环节是否已完成闭环。`
+      }`,
+    },
+  ];
+
   if (aiCfg.hasKey && aiCfg.apiKey) {
     try {
       const safeBaseUrl = validateAllowedLlmBaseUrl(aiCfg.baseUrl);
       trace.push({
         tool: 'llm_draft_synthesis',
-        summary: `调用 ${aiCfg.model} 提炼【${cleanTitle}】结构化业务词条草稿`,
+        summary: `调用 ${aiCfg.model} 按 V5 因词制宜规范提炼【${cleanTitle}】词条草稿`,
       });
       const res = await fetch(`${safeBaseUrl}/v1/chat/completions`, {
         method: 'POST',
@@ -192,8 +302,8 @@ export async function generateTermWithHarness(
               role: 'system',
               content:
                 options?.category === 'asop'
-                  ? '请基于给定的业务上下文与源码规则摘要，输出 JSON 格式的【端到端业务流程攻略 (ASOP Playbook)】草稿：{"analogy":"一句通俗生活比喻","plain":"一句端到端全链路主线概述","markdown":"Markdown格式的端到端业务流程攻略，包含：1. 全链路流转图（使用 ```mermaid\\nflowchart LR\\nA[阶段1] --> B[阶段2]\\n``` 语法）；2. 关键节点准入与状态拆解表格；3. 常见业务卡单排障指南（纯业务语言，严禁出现代码类名、数据库表名、Git哈希或Emoji）"}。'
-                  : '请基于给定的业务上下文与源码规则摘要，输出 JSON 格式词条草稿：{"analogy":"一句通俗生活比喻","plain":"一句业务大白话定义","markdown":"Markdown格式的清晰业务解析（包含通俗本质引用块、核心规则拆解表格、角色职责与业务影响说明，纯业务语言，严禁出现代码类名、数据库表名、Git哈希或Emoji）"}。',
+                  ? '请基于给定的业务上下文与源码规则摘要，按 V5 规范输出 JSON 格式的【端到端业务流程攻略 (ASOP Playbook)】草稿：{"analogy":"一句通俗生活比喻","plain":"一句端到端全链路主线概述","markdown":"Markdown格式的端到端业务流程攻略，包含：1. 全链路流转图（使用 ```mermaid\\nflowchart LR\\nA[\\"阶段1\\"] --> B[\\"阶段2\\"]\\n``` 语法，含括号或斜杠的节点名必须加双引号）；2. 关键节点准入与状态拆解表格；3. 常见业务卡单排障指南（纯业务语言，严禁出现代码文件名、物理表名、Git哈希或Emoji）","faqs":[{"q":"高频排障问题1","a":"纯业务排障解答1"},{"q":"高频排障问题2","a":"纯业务排障解答2"}]}。'
+                  : '请基于给定的业务上下文与源码规则摘要，按 V5「标准导读外壳 + 因词制宜自由表达内芯（反八股文模具）」规范输出 JSON 格式词条草稿：{"analogy":"一句通俗生活比喻","plain":"一句业务大白话定义","markdown":"因词制宜组织的Markdown正文（根据词条属性灵活选用生命周期状态表、核算公式与剔除边界表、或核心机制判定规则表；纯业务语言，严禁出现代码文件名、物理表名、Git哈希、装饰性Emoji或空洞AI套话）","faqs":[{"q":"一线高频排障/边界问题1","a":"具体核查步骤与业务解答1"},{"q":"跨角色协同或口径核对问题2","a":"具体核查步骤与业务解答2"}]}。',
             },
             {
               role: 'user',
@@ -227,6 +337,25 @@ export async function generateTermWithHarness(
           if (parsed.markdown) {
             generatedMarkdown = parsed.markdown;
           }
+          if (Array.isArray(parsed.faqs) && parsed.faqs.length >= 2) {
+            const validFaqs = parsed.faqs
+              .filter((f: any) => f && f.q && f.a)
+              .map((f: any) => ({
+                q: sanitizeBusinessProse(String(f.q)),
+                a: sanitizeBusinessProse(String(f.a)),
+              }));
+            if (validFaqs.length >= 2) {
+              generatedFaqs = validFaqs;
+            }
+          }
+          if (Array.isArray(parsed.dataMappings) && parsed.dataMappings.length > 0) {
+            const validMappings = parsed.dataMappings.filter(
+              (m: any) => m && m.db && m.table && m.field && m.rule
+            );
+            if (validMappings.length > 0) {
+              synthesizedDataMappings = validMappings;
+            }
+          }
         }
       }
     } catch {
@@ -234,16 +363,44 @@ export async function generateTermWithHarness(
     }
   }
 
-  // 仅当存在真实源码考据命中或显式授信/模板确认时方可视为已核实 (grounded=true)；纯模型凭未核实上下文合成的草稿必须保留为 DRAFT 待审
+  // 对台前展示文本执行统一净化，杜绝文件名/Commit哈希/DSML标签泄露
+  generatedAnalogy = sanitizeBusinessProse(generatedAnalogy);
+  generatedPlain = sanitizeBusinessProse(generatedPlain);
+  generatedMarkdown = sanitizeBusinessProse(generatedMarkdown);
+  generatedFaqs = generatedFaqs.map((f) => ({
+    q: sanitizeBusinessProse(f.q),
+    a: sanitizeBusinessProse(f.a),
+  }));
+
+  // 仅当存在真实源码考据命中或显式授信/模板确认时方可视为已核实 (grounded=true)；仅继承父词条指针或纯模型合成的草稿必须保留为 DRAFT 待审
   const grounded = Boolean(hits.length > 0 || options?.isGroundedOverride);
 
   const defaultCategory =
     options?.category ||
     lexiconStore
       .getCategories()
-      .find((c) => c.id !== 'asop' && cleanTitle.includes(c.name.slice(0, 2)))?.id ||
+      .find((c) => c.id !== 'asop' && cleanTitle.includes(c.name.slice(0, 2)))
+      ?.id ||
     lexiconStore.getCategories().find((c) => c.id !== 'asop')?.id ||
     'core';
+
+  // 自动扫描正文与摘要中提及的库内既有词条，织入双向血缘关系网
+  const allExistingTerms = await lexiconStore.getTermsAsync();
+  const autoRelations: NonNullable<TermEntry['relations']> = options?.sourceTermId
+    ? [{ target: options.sourceTermId, label: '关联业务来源' }]
+    : [];
+  const combinedProse = `${generatedPlain}\n${generatedMarkdown}`;
+  for (const existing of allExistingTerms) {
+    if (existing.id === slug) continue;
+    if (autoRelations.length >= 6) break;
+    if (autoRelations.some((r) => r.target === existing.id)) continue;
+    if (existing.title.length >= 2 && combinedProse.includes(existing.title)) {
+      autoRelations.push({
+        target: existing.id,
+        label: '正文提及关联概念',
+      });
+    }
+  }
 
   const newTerm: TermEntry = {
     id: slug,
@@ -262,19 +419,12 @@ export async function generateTermWithHarness(
     },
     articleMarkdown: generatedMarkdown,
     engineering: {
-      repos: [],
-      pointers: [],
-      dataMappings: [],
+      repos: synthesizedRepos,
+      pointers: synthesizedPointers,
+      dataMappings: synthesizedDataMappings,
     },
-    relations: options?.sourceTermId
-      ? [{ target: options.sourceTermId, label: '关联业务来源' }]
-      : [],
-    faqs: [
-      {
-        q: `在实际业务协同中，如何理解【${cleanTitle}】的定位与作用？`,
-        a: `${generatedPlain} 在跨岗位配合时，建议结合上下游关联词条核对准入条件与流转状态。`,
-      },
-    ],
+    relations: autoRelations,
+    faqs: generatedFaqs,
     meta: {
       updatedAt: new Date().toISOString().slice(0, 10),
       maintainedBy: operator,
@@ -286,7 +436,7 @@ export async function generateTermWithHarness(
   if (options?.persistImmediately === false) {
     trace.push({
       tool: 'pg_save_term_draft',
-      summary: `已在内存构建候选词条草稿 (grounded=${grounded})，交由候选决议器执行跨进程原子抢占落库`,
+      summary: `已在内存构建候选词条草稿 (grounded=${grounded}, pointers=${synthesizedPointers.length})，交由候选决议器执行跨进程原子抢占落库`,
     });
     return { term: newTerm, trace, grounded, hitCount: hits.length };
   }
@@ -298,9 +448,33 @@ export async function generateTermWithHarness(
       : `考据生成新词条草稿 (${hits.length} 处真实代码命中)`,
     operator
   );
+
+  // 为自动织入的目标词条反向补齐血缘链接，杜绝单向孤岛链接
+  for (const rel of autoRelations) {
+    const targetTerm = await lexiconStore.getTermByIdAsync(rel.target);
+    if (
+      targetTerm &&
+      !(targetTerm.relations || []).some((r) => r.target === saved.id)
+    ) {
+      const updatedTarget: TermEntry = {
+        ...targetTerm,
+        relations: [
+          ...(targetTerm.relations || []),
+          { target: saved.id, label: '关联上下游概念' },
+        ],
+      };
+      await lexiconStore.saveTermAsync(
+        updatedTarget,
+        `自动补齐与新词条【${saved.title}】的反向血缘关联`,
+        operator,
+        targetTerm.meta?.revision
+      );
+    }
+  }
+
   trace.push({
     tool: 'pg_save_term_draft',
-    summary: `已原子写入 PostgreSQL (status=DRAFT, grounded=${grounded}, revision=${saved.meta?.revision || 1})`,
+    summary: `已原子写入 PostgreSQL (status=DRAFT, grounded=${grounded}, pointers=${synthesizedPointers.length}, revision=${saved.meta?.revision || 1})`,
   });
 
   return { term: saved, trace, grounded, hitCount: hits.length };

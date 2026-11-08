@@ -21,6 +21,7 @@ import {
   dissectTermSproutsWithHarness,
   expandCandidateWithHarness,
   runSproutWaveWithHarness,
+  auditLexiconQuality,
 } from './services/agent-harness.js';
 import { runWorkerCycle } from './worker.js';
 
@@ -693,6 +694,42 @@ app.post('/api/harness/run-wave', async (c) => {
   } catch (err: any) {
     return c.json(
       { ok: false, error: err?.message || '一键引爆波次执行失败' },
+      400
+    );
+  }
+});
+
+app.get('/api/harness/audit', async (c) => {
+  try {
+    const report = await auditLexiconQuality({ autoFix: false });
+    return c.json({ ok: true, ...report });
+  } catch (err: any) {
+    return c.json(
+      { ok: false, error: err?.message || '词库质量巡检失败' },
+      400
+    );
+  }
+});
+
+app.post('/api/harness/audit', async (c) => {
+  const user = c.get('user');
+  const body = await c.req.json().catch(() => ({}));
+  const autoFix = Boolean(body.autoFix);
+  if (autoFix && !canEditTerms(user.role)) {
+    return c.json(
+      { ok: false, error: '权限不足：仅管理员或编审员可执行自动修复' },
+      403
+    );
+  }
+  try {
+    const report = await auditLexiconQuality({
+      autoFix,
+      operator: user.username,
+    });
+    return c.json({ ok: true, ...report });
+  } catch (err: any) {
+    return c.json(
+      { ok: false, error: err?.message || '词库质量巡检与自动修复失败' },
       400
     );
   }
