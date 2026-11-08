@@ -271,11 +271,21 @@ export async function grepPrdCode(
             '-n',
             '--no-ignore',
             '--max-count',
-            '2',
+            '6',
             '-g',
             '!**/docs/**',
             '-g',
             '!**/docs-site/**',
+            '-g',
+            '!**/tests/**',
+            '-g',
+            '!**/__tests__/**',
+            '-g',
+            '!**/*.test.*',
+            '-g',
+            '!**/*.spec.*',
+            '-g',
+            '!**/playwright.config.*',
             '-g',
             '!**/*.md',
             '-g',
@@ -305,7 +315,7 @@ export async function grepPrdCode(
         );
 
         for (const line of out.split('\n')) {
-          if (!line.trim() || hits.length >= limit) continue;
+          if (!line.trim() || hits.length >= limit * 3) continue;
           const match = line.match(/^(?:\.\/)?([^/]+)\/([^:]+):(\d+):(.*)$/);
           if (match) {
             const repo = match[1];
@@ -326,7 +336,7 @@ export async function grepPrdCode(
       }
     } else {
       for (const repo of targetRepos) {
-        if (hits.length >= limit) break;
+        if (hits.length >= limit * 3) break;
         const repoDir = resolveRepoDir(repo);
         if (!fs.existsSync(repoDir)) continue;
 
@@ -338,11 +348,21 @@ export async function grepPrdCode(
               '-n',
               '--no-ignore',
               '--max-count',
-              '5',
+              '8',
               '-g',
               '!**/docs/**',
               '-g',
               '!**/docs-site/**',
+              '-g',
+              '!**/tests/**',
+              '-g',
+              '!**/__tests__/**',
+              '-g',
+              '!**/*.test.*',
+              '-g',
+              '!**/*.spec.*',
+              '-g',
+              '!**/playwright.config.*',
               '-g',
               '!**/*.md',
               '-g',
@@ -372,7 +392,7 @@ export async function grepPrdCode(
           );
 
           for (const line of out.split('\n')) {
-            if (!line.trim() || hits.length >= limit) continue;
+            if (!line.trim() || hits.length >= limit * 3) continue;
             const match = line.match(/^(?:\.\/)?([^:]+):(\d+):(.*)$/);
             if (match && !isSensitiveRelativePath(match[1])) {
               hits.push({
@@ -454,7 +474,25 @@ export async function grepPrdCode(
     }
   }
 
-  return hits;
+  const scoreRawHit = (h: CodeSearchHit): number => {
+    let s = 0;
+    if (/^\s*(?:import|export\s+\{[^}]*\}\s+from)\b/.test(h.snippet)) {
+      s -= 60;
+    }
+    if (
+      /\b(?:export\s+)?(?:async\s+)?function\b|\bclass\s+[A-Z]|\b(?:public|private|protected)\s+|\bconst\s+[A-Za-z0-9_]+\s*=\s*(?:async\s*)?\(/.test(
+        h.snippet
+      )
+    ) {
+      s += 45;
+    }
+    if (/\/(?:domain|services|service|core|usecases)\//i.test(h.path)) {
+      s += 35;
+    }
+    return s;
+  };
+
+  return hits.sort((a, b) => scoreRawHit(b) - scoreRawHit(a)).slice(0, limit);
 }
 
 /**

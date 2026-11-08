@@ -901,12 +901,7 @@ export async function auditLexiconQuality(options?: {
     }
 
     const isNonPlaybookAsop =
-      term.category === 'asop' &&
-      (term.id.startsWith('term-sprout-') ||
-        (!term.id.startsWith('asop-') &&
-          !/攻略|全链路|全景|工作流|端到端|SOP|Playbook/i.test(
-            `${term.title} ${term.subtitle || ''}`
-          )));
+      term.category === 'asop' && term.id.startsWith('term-sprout-');
     const isInvalidCategory = !validCategoryIds.has(term.category);
 
     if (isNonPlaybookAsop || isInvalidCategory) {

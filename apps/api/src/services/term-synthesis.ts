@@ -63,9 +63,13 @@ export async function generateTermWithHarness(
   hitCount: number;
 }> {
   const cleanTitle = title.trim();
+  const isAsopCategory = options?.category === 'asop';
   const slug =
     options?.preferredId?.trim() ||
-    `term-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    `${isAsopCategory ? 'asop' : 'term'}-${crypto
+      .randomUUID()
+      .replace(/-/g, '')
+      .slice(0, 16)}`;
 
   if (options?.preferredId && options?.persistImmediately !== false) {
     const existingById = await lexiconStore.getTermByIdAsync(slug);
@@ -91,20 +95,31 @@ export async function generateTermWithHarness(
     summary: `在代码库中检索 "${cleanTitle}" -> 命中 ${hits.length} 处真实代码`,
   });
 
-  if (hits.length === 0 && options?.contextSnippet) {
-    const codeTokens =
-      options.contextSnippet.match(
-        /[a-z]+[A-Z][A-Za-z0-9]*|[A-Za-z0-9]+_[A-Za-z0-9_]+/g
-      ) || [];
-    for (const token of codeTokens.slice(0, 2)) {
-      const subHits = await grepPrdCode(token, undefined, 6);
+  if (options?.contextSnippet) {
+    const codeTokens = Array.from(
+      new Set(
+        options.contextSnippet.match(
+          /[a-z]+[A-Z][A-Za-z0-9]*|[A-Za-z0-9]+_[A-Za-z0-9_]+|[A-Z][a-zA-Z0-9]{3,}/g
+        ) || []
+      )
+    );
+    for (const token of codeTokens.slice(0, 4)) {
+      if (hits.length >= 8) break;
+      const subHits = await grepPrdCode(token, undefined, 4);
       if (subHits.length > 0) {
-        hits = subHits;
+        for (const sh of subHits) {
+          if (
+            !hits.some(
+              (eh) => eh.repo === sh.repo && eh.path === sh.path && eh.line === sh.line
+            )
+          ) {
+            hits.push(sh);
+          }
+        }
         trace.push({
           tool: 'grep_prd_code',
-          summary: `结合划词上下文标识符 "${token}" 关联检索 -> 命中 ${subHits.length} 处真实代码`,
+          summary: `结合上下文标识符 "${token}" 关联检索 -> 命中 ${subHits.length} 处真实代码`,
         });
-        break;
       }
     }
   }
@@ -136,24 +151,30 @@ export async function generateTermWithHarness(
     ? await lexiconStore.getTermByIdAsync(options.sourceTermId)
     : undefined;
 
-  // 将命中的前 3 处真实源码片段自动同步至 PostgreSQL lexicon_code_snapshots 并提取精准代码指针
+  // 将命中的前 4 处真实源码片段自动同步至 PostgreSQL lexicon_code_snapshots 并提取精准代码指针与多行源码切片
   const codeEvidenceNotes: string[] = [];
+  const codeSlicesForPrompt: Array<{
+    repo: string;
+    path: string;
+    lines: string;
+    content: string;
+  }> = [];
   const synthesizedPointers: NonNullable<TermEntry['engineering']>['pointers'] = [];
 
   for (const h of hits.slice(0, 4)) {
     const slice = await readPrdFile({
       repo: h.repo,
       filePath: h.path,
-      lines: `L${Math.max(1, h.line - 8)}-L${h.line + 20}`,
+      lines: `L${Math.max(1, h.line - 10)}-L${h.line + 35}`,
       commit: h.commit,
     });
     const lineRange = slice
       ? `L${slice.startLine}-L${slice.endLine}`
-      : `L${Math.max(1, h.line - 8)}-L${h.line + 20}`;
+      : `L${Math.max(1, h.line - 10)}-L${h.line + 35}`;
     const resolvedCommit = slice?.resolvedCommit || h.commit || 'HEAD';
     const branch = slice?.branch || h.branch || 'prd';
 
-    if (slice && slice.content && synthesizedPointers.length < 3) {
+    if (slice && slice.content && synthesizedPointers.length < 4) {
       await lexiconStore.upsertCodeSnapshot({
         repo: slice.repo,
         branch: slice.branch,
@@ -161,6 +182,12 @@ export async function generateTermWithHarness(
         filePath: slice.path,
         lineRange,
         content: slice.content,
+      });
+      codeSlicesForPrompt.push({
+        repo: slice.repo,
+        path: slice.path,
+        lines: lineRange,
+        content: slice.content.slice(0, 1600),
       });
       const chineseComments =
         slice.content
@@ -312,12 +339,20 @@ export async function generateTermWithHarness(
                 rawAdopted ? `已验证的伴读解释：${rawAdopted}` : '',
                 options?.contextSnippet ? `来源上下文：${options.contextSnippet}` : '',
                 hits.length > 0
-                  ? `真实代码考据命中摘要（共 ${hits.length} 处，请转化为纯业务规则描述，切勿暴露文件名或表名）：\n${JSON.stringify(
+                  ? `真实代码考据命中摘要（共 ${hits.length} 处，请严格以源码实现中的真实判定顺序、状态流转与拦截条件为准转化为纯业务语言，严禁凭空脑补源码未实现的规则，且切勿暴露文件名或表名）：\n${JSON.stringify(
                       hits.slice(0, 5).map((h) => ({
                         repo: h.repo,
                         snippet: h.snippet,
                       }))
                     )}`
+                  : '',
+                codeSlicesForPrompt.length > 0
+                  ? `精读的真实源码实现切片（唯一事实源，请严格遵循其中的真实逻辑）：\n${codeSlicesForPrompt
+                      .map(
+                        (s) =>
+                          `--- [${s.repo}] (${s.lines}) ---\n${s.content}`
+                      )
+                      .join('\n\n')}`
                   : '',
               ]
                 .filter(Boolean)
@@ -405,7 +440,10 @@ export async function generateTermWithHarness(
   const newTerm: TermEntry = {
     id: slug,
     title: cleanTitle,
-    subtitle: '业务词条 · 核心概念与协同口径解析',
+    subtitle:
+      defaultCategory === 'asop'
+        ? '端到端业务流程攻略 · 跨角色全链路流转与卡点排障'
+        : '业务词条 · 核心概念与协同口径解析',
     pinyin: cleanTitle
       .slice(0, 4)
       .toUpperCase()

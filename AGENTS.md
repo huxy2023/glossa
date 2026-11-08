@@ -32,11 +32,13 @@
 
 维护或扩充词库时，必须通过内置 Harness 工具链闭环执行，严禁绕过引擎手工拼接残缺 JSON：
 
-1. **检索对齐**：`pnpm glossa lookup "<关键词>"` — 检查既有词条、分类与血缘关系，避免同义词重复建档；
-2. **概念解剖**：`pnpm glossa dissect <termId>` — 扫描词条正文并经噪音/技术词过滤器提炼候选新芽（Sprouts）；
-3. **源码举证与合成**：`pnpm glossa resolve <sproutId>` 或 `pnpm glossa run-wave <termId>` — 自动联动 `grepPrdCode` + `readPrdFile` 提取真实源码指针，生成词条并建立父子双向血缘；
-4. **词库健康巡检与自愈**：`pnpm glossa audit --fix`（或 `POST /api/harness/audit`）— 自动扫描并修复正文中残留的代码文件名/Commit 泄露、错误分类归属、单向断链血缘及正文中已提及却未绑定 `relations` 的孤岛词条；
-5. **代码漂移巡检**：`pnpm glossa drift` — 核验各词条 `engineering.pointers` 关联的 Git Commit 与源码行是否发生变更。
+1. **检索对齐与盘点**：`pnpm glossa list` / `pnpm glossa lookup "<关键词>"` — 检查既有词条、分类与血缘关系，避免同义词重复建档；
+2. **冷启动建词与源码举证**：`pnpm glossa generate "<词条或攻略名称>" [--category core|asop|...] [--context "<代码标识符>"] [--publish]` — 新项目冷启动或新增独立概念时，自动检索 `GLOSSA_WORKSPACE_ROOT` 源码并沉淀指针生成词条；
+3. **概念解剖**：`pnpm glossa dissect <termId>`（或 `pnpm glossa dissect --text "<种子文本>" --title "<来源标题>"`）— 扫描词条正文并经噪音/技术词过滤器提炼候选新芽（Sprouts）；
+4. **触手决议与波次裂变**：`pnpm glossa resolve <sproutId>` 或 `pnpm glossa run-wave <termId>` — 自动联动 `grepPrdCode` + `readPrdFile` 提取真实源码指针，生成词条并建立父子双向血缘；
+5. **业务参谋实证推演**：`pnpm glossa consult "<业务问题>" [--skill troubleshooting|solution-design|metrics-analytics|jargon-demystify]` — 词典召回 + 源码探针搭桥 + 参谋技能作答；
+6. **词库健康巡检与自愈**：`pnpm glossa audit --fix`（或 `POST /api/harness/audit`）— 自动扫描并修复正文中残留的代码文件名/Commit 泄露、错误分类归属、单向断链血缘及正文中已提及却未绑定 `relations` 的孤岛词条；
+7. **代码漂移巡检**：`pnpm glossa drift` — 核验各词条 `engineering.pointers` 关联的 Git Commit 与源码行是否发生变更。
 
 ## 4. 核心架构约束
 
